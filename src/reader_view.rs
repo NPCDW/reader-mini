@@ -127,6 +127,22 @@ pub fn show_reader(
     cfg: &crate::config::Config,
     req: ShowRequest,
 ) -> anyhow::Result<ReaderWindow> {
+    let reader = ReaderWindow::new()?;
+    activate(app, &reader, state, cfg, req);
+    Ok(reader)
+}
+
+/// 把一份内容装进已有（或新建）的阅读窗口：重置状态、铺正文、按行号定位、接线回调。
+///
+/// 新建窗口与"刷新同一个窗口"走的是同一条路径：只要给了 `start_line`，
+/// 正文会整体重铺并按该行重新定位，不需要区分首次打开还是重开。
+pub fn activate(
+    app: &AppWindow,
+    reader: &ReaderWindow,
+    state: &Rc<std::cell::RefCell<ReaderState>>,
+    cfg: &crate::config::Config,
+    req: ShowRequest,
+) {
     let ShowRequest {
         book_index,
         chapter_index,
@@ -134,36 +150,83 @@ pub fn show_reader(
         text,
         start_line,
     } = req;
-    let reader = ReaderWindow::new()?;
-
-    let rows = build_row_offsets(&text, line_chars_per_row(cfg.read_font_size) as usize);
     {
         let mut s = state.borrow_mut();
         s.visible = true;
         s.book_index = book_index;
         s.chapter_index = chapter_index;
         s.chapter_title = chapter_title.clone();
-        s.row_offsets = rows;
         s.text = text;
-        s.card_line = start_line;
+        s.card_line = 0;
         s.scroll_y = 0.0;
+        s.drag_origin = None;
     }
 
-    apply_style(&reader, cfg);
-    reader.set_title_text(chapter_title.into());
+    // 内容变了，折行表得重建（按当前字号）—— apply_style 里会顺带做掉
+    apply_style(reader, cfg, state);
+    reader.set_title_text(chapter_title.clone().into());
+    reader.set_page_info("".into());
     reader.set_full_text(state.borrow().text.clone().into());
-
-    render(&reader, state);
-    wire_reader(&reader, app, state);
-    Ok(reader)
+    reader.set_scroll_offset(0.0);
+    render(reader, state);
+    wire_reader(reader, app, state);
+    locate(reader, state, start_line);
 }
 
-/// 把配置里的颜色 / 字号应用到阅读窗口
-pub fn apply_style(reader: &ReaderWindow, cfg: &crate::config::Config) {
+/// 滚到正文的第 `card_line` 个逻辑行，并同步状态与页脚。
+///
+/// 定位一律用视口的**实际行高**换算，不依赖视图报出来的可见行数：
+/// 首帧还没布局时那个值可能是 0，靠它会跳错位置。
+pub fn locate(
+    reader: &ReaderWindow,
+    state: &Rc<std::cell::RefCell<ReaderState>>,
+    card_line: usize,
+) {
+    let line_height = (reader.get_font_size() * reader.get_line_height_factor()).max(1.0);
+    {
+        let mut s = state.borrow_mut();
+        let total_rows = s.row_offsets.len().saturating_sub(1);
+        s.card_line = card_line.min(total_rows);
+        let row = row_of(&s, s.card_line);
+        // content-y 向下为负
+        s.scroll_y = -(row as f32 * line_height);
+    }
+    reader.set_scroll_offset(state.borrow().scroll_y);
+    render(reader, state);
+}
+
+/// 某个逻辑行落在折行后的第几个显示行（对外也用于定位 / 测试）
+pub fn row_of(s: &ReaderState, card_line: usize) -> usize {
+    let offsets = card_line_offsets(&s.text);
+    offsets
+        .get(card_line)
+        .map(|off| {
+            s.row_offsets
+                .partition_point(|&o| o <= *off)
+                .saturating_sub(1)
+        })
+        .unwrap_or(0)
+}
+
+/// 把配置里的颜色 / 字号应用到阅读窗口。
+///
+/// 字号 / 行高一变，折行表和滚动坐标就全变了，所以顺手按当前逻辑行重新定位一次，
+/// 免得"改个字号就跳回开头"。
+pub fn apply_style(
+    reader: &ReaderWindow,
+    cfg: &crate::config::Config,
+    state: &Rc<std::cell::RefCell<ReaderState>>,
+) {
     reader.set_bg(parse_color(&cfg.read_bg));
     reader.set_fg(parse_color(&cfg.read_fg));
     reader.set_font_size(cfg.read_font_size as f32);
     reader.set_line_height_factor(cfg.read_line_height);
+
+    let line = state.borrow().card_line;
+    let text = state.borrow().text.clone();
+    state.borrow_mut().row_offsets =
+        build_row_offsets(&text, line_chars_per_row(cfg.read_font_size) as usize);
+    locate(reader, state, line);
 }
 
 /// 按字号估算每屏能放几行正文
@@ -186,15 +249,7 @@ fn render(reader: &ReaderWindow, state: &Rc<std::cell::RefCell<ReaderState>>) {
     let s = state.borrow();
     let total_rows = s.row_offsets.len().saturating_sub(1).max(1);
     // 当前逻辑行在折行后的行号
-    let card_offsets = card_line_offsets(&s.text);
-    let row = card_offsets
-        .get(s.card_line)
-        .map(|off| {
-            s.row_offsets
-                .partition_point(|&o| o <= *off)
-                .saturating_sub(1)
-        })
-        .unwrap_or(0);
+    let row = row_of(&s, s.card_line);
     // 距离正文末尾还有几行
     let remain = total_rows.saturating_sub(row);
     let pct = if total_rows == 0 {
@@ -234,15 +289,7 @@ fn step(reader: &ReaderWindow, state: &Rc<std::cell::RefCell<ReaderState>>, dire
             rows.max(2),
             direction,
         );
-        let target_row = card_offsets
-            .get(s.card_line)
-            .map(|off| {
-                row_offsets
-                    .partition_point(|&o| o <= *off)
-                    .saturating_sub(1)
-            })
-            .unwrap_or(0);
-        s.scroll_y = -(target_row as f32 * line_height);
+        s.scroll_y = -(row_of(&s, s.card_line) as f32 * line_height);
     }
     let y = state.borrow().scroll_y;
     reader.set_scroll_offset(y);

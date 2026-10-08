@@ -33,7 +33,45 @@ export component AppWindow inherits Window {
     in-out property <string> line-height-text: "1.5";
     in-out property <string> hotkey: "Ctrl+Alt+R";
     in-out property <string> hotkey-input: "Ctrl+Alt+R";
-    in-out property <string> status: "";
+    in-out property <bool> capturing: false;
+
+    // 一次按键事件 -> 配置串。修饰键单独按下不当输入，只在主键按下时才落地。
+    public function hotkey-from-key(event: KeyEvent) {
+        if (event.text == Key.Shift) { return; }
+        if (event.text == Key.Control) { return; }
+        if (event.text == Key.Alt) { return; }
+        if (event.text == Key.Meta) { return; }
+
+        root.hotkey-input = ""
+            + root.hotkey-part(event.modifiers.control, "Ctrl")
+            + root.hotkey-part(event.modifiers.alt, "Alt")
+            + root.hotkey-part(event.modifiers.shift, "Shift")
+            + root.hotkey-part(event.modifiers.meta, "Super")
+            + root.hotkey-name(event);
+        root.capturing = false;
+    }
+
+    public function hotkey-part(on: bool, name: string) -> string {
+        return on ? (name + "+") : "";
+    }
+
+    public function hotkey-name(event: KeyEvent) -> string {
+        if (event.text == Key.Space) { return "Space"; }
+        if (event.text == Key.UpArrow) { return "Up"; }
+        if (event.text == Key.DownArrow) { return "Down"; }
+        if (event.text == Key.LeftArrow) { return "Left"; }
+        if (event.text == Key.RightArrow) { return "Right"; }
+        if (event.text == Key.PageUp) { return "PageUp"; }
+        if (event.text == Key.PageDown) { return "PageDown"; }
+        if (event.text == Key.Home) { return "Home"; }
+        if (event.text == Key.End) { return "End"; }
+        if (event.text == Key.Insert) { return "Insert"; }
+        if (event.text == Key.Escape) { return "Esc"; }
+        if (event.text == Key.Tab) { return "Tab"; }
+        return event.text;
+    }
+
+   in-out property <string> status: "";
     in property <bool> loading: false;
 
     callback open-book(int);
@@ -173,36 +211,131 @@ export component AppWindow inherits Window {
         if root.tab == 1 : ScrollView {
             VerticalLayout {
                 padding: 16px;
-                spacing: 10px;
+                spacing: 12px;
                 alignment: start;
-                Text { text: "服务地址 baseUrl"; font-size: 14px; color: #333; width: 100%; }
-                TextInput { text <=> root.base-url; height: 36px; font-size: 14px; width: 100%; }
-                Text { text: "阅读窗口：背景色 / 字体色 / 字号"; font-size: 14px; color: #333; width: 100%; }
-                HorizontalLayout {
-                    spacing: 10px;
-                    TextInput { text <=> root.read-bg; height: 36px; font-size: 14px; horizontal-stretch: 1; }
-                    TextInput { text <=> root.read-fg; height: 36px; font-size: 14px; horizontal-stretch: 1; }
-                    TextInput {
-                        text: root.font-size-text;
-                        height: 36px;
-                        font-size: 14px;
-                        input-type: number;
-                        horizontal-stretch: 1;
-                        edited => { root.read-font-size = self.text.to-float(); }
+
+                Text {
+                    text: "服务地址 baseUrl";
+                    font-size: 14px;
+                    color: #333;
+                    width: 100%;
+                }
+                Rectangle {
+                    width: 100%;
+                    height: 38px;
+                    background: white;
+                    border-width: 1px;
+                    border-radius: 6px;
+                    // 输入框始终有可见边框，聚焦时换个颜色提示
+                    border-color: base-url.has-focus ? #4a6fa5 : #c8ced8;
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        base-url := TextInput {
+                            width: 100%;
+                            height: 100%;
+                            font-size: 14px;
+                            vertical-alignment: center;
+                            text <=> root.base-url;
+                        }
                     }
                 }
+
+                Text {
+                    text: "阅读窗口：背景色 / 字体色 / 字号";
+                    font-size: 14px;
+                    color: #333;
+                    width: 100%;
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 38px;
+                        background: white;
+                        border-width: 1px;
+                        border-radius: 6px;
+                        border-color: read-bg.has-focus ? #4a6fa5 : #c8ced8;
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            read-bg := TextInput {
+                                width: 100%;
+                                height: 100%;
+                                font-size: 14px;
+                                vertical-alignment: center;
+                                text <=> root.read-bg;
+                            }
+                        }
+                    }
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 38px;
+                        background: white;
+                        border-width: 1px;
+                        border-radius: 6px;
+                        border-color: read-fg.has-focus ? #4a6fa5 : #c8ced8;
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            read-fg := TextInput {
+                                width: 100%;
+                                height: 100%;
+                                font-size: 14px;
+                                vertical-alignment: center;
+                                text <=> root.read-fg;
+                            }
+                        }
+                    }
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        height: 38px;
+                        background: white;
+                        border-width: 1px;
+                        border-radius: 6px;
+                        border-color: font-size-input.has-focus ? #4a6fa5 : #c8ced8;
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            font-size-input := TextInput {
+                                width: 100%;
+                                height: 100%;
+                                font-size: 14px;
+                                vertical-alignment: center;
+                                input-type: number;
+                                text: root.font-size-text;
+                                edited => { root.read-font-size = self.text.to-float(); }
+                            }
+                        }
+                    }
+                }
+
                 Text {
                     text: "行高倍数（相对字号，默认 1.5）";
                     font-size: 14px;
                     color: #333;
                     width: 100%;
                 }
-                TextInput {
-                    text <=> root.line-height-text;
-                    height: 36px;
-                    font-size: 14px;
+                Rectangle {
                     width: 100%;
+                    height: 38px;
+                    background: white;
+                    border-width: 1px;
+                    border-radius: 6px;
+                    border-color: line-height-input.has-focus ? #4a6fa5 : #c8ced8;
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        line-height-input := TextInput {
+                            width: 100%;
+                            height: 100%;
+                            font-size: 14px;
+                            vertical-alignment: center;
+                            text <=> root.line-height-text;
+                        }
+                    }
                 }
+
                 Text {
                     text: "全局快捷键（呼出 / 关闭阅读窗口，保存后立即生效）";
                     font-size: 14px;
@@ -211,16 +344,47 @@ export component AppWindow inherits Window {
                 }
                 HorizontalLayout {
                     spacing: 8px;
-                    TextInput {
-                        text <=> root.hotkey-input;
-                        // Slint 无 placeholder，用空值兜底提示（见下方说明文字）
-                        height: 36px;
-                        font-size: 14px;
+                    // 捕获框：不接收文本，直接听键盘按下，拼成 "Ctrl+Alt+R" 这种写法
+                    Rectangle {
                         horizontal-stretch: 1;
+                        height: 38px;
+                        background: white;
+                        border-width: 1px;
+                        border-radius: 6px;
+                        border-color: root.capturing ? #4a6fa5 : #c8ced8;
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            Text {
+                                text: root.capturing
+                                    ? (root.hotkey-input == "" ? "请按下组合键…" : root.hotkey-input)
+                                    : (root.hotkey-input == "" ? "点击这里，再按下组合键" : root.hotkey-input);
+                                color: root.capturing ? #4a6fa5 : #333;
+                                font-size: 14px;
+                                vertical-alignment: center;
+                            }
+                        }
+                        // 点一下开始录制，顺带把键盘焦点拿过来
+                        capture-scope := FocusScope {
+                            width: 100%;
+                            height: 100%;
+                            focus-on-click: true;
+                            key-pressed(event) => {
+                                root.hotkey-from-key(event);
+                                accept
+                            }
+                        }
+                        TouchArea {
+                            clicked => {
+                                root.capturing = true;
+                                root.hotkey-input = "";
+                                capture-scope.focus();
+                            }
+                        }
                     }
                     Rectangle {
                         width: 96px;
-                        height: 36px;
+                        height: 38px;
                         background: #e3e6ea;
                         border-radius: 6px;
                         Text {
@@ -230,7 +394,12 @@ export component AppWindow inherits Window {
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }
-                        TouchArea { clicked => { root.hotkey-input = "Ctrl+Alt+R"; } }
+                        TouchArea {
+                            clicked => {
+                                root.capturing = false;
+                                root.hotkey-input = "Ctrl+Alt+R";
+                            }
+                        }
                     }
                 }
                 Text {
@@ -242,8 +411,9 @@ export component AppWindow inherits Window {
                 Button {
                     text: "保存设置";
                     width: 140px;
-                    height: 36px;
+                    height: 38px;
                     clicked => {
+                        root.capturing = false;
                         root.save-settings(
                             root.base-url,
                             root.read-bg,

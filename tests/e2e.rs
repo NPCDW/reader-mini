@@ -326,3 +326,168 @@ fn page_down_key_scrolls_one_screen() {
     assert_eq!(reader.get_scroll_offset(), 0.0);
     assert_eq!(state.borrow().card_line, 0);
 }
+
+/// 「阅读」按钮：同一个内容可以按给定位置反复刷新，窗口被重新定位。
+#[test]
+fn activate_republishes_content_at_requested_line() {
+    i_slint_backend_testing::init_no_event_loop();
+
+    let cfg = reader_mini::config::Config::default();
+    let state = std::rc::Rc::new(std::cell::RefCell::new(
+        reader_mini::reader_view::ReaderState::default(),
+    ));
+    let app = reader_mini::app::AppWindow::new().unwrap();
+
+    let text: String = (1..=60)
+        .map(|i| format!("第{i}行：这是一段用于验证刷新阅读页的正文内容。\n"))
+        .collect();
+    let reader = reader_mini::reader_view::show_reader(
+        &app,
+        &state,
+        &cfg,
+        reader_mini::reader_view::ShowRequest {
+            book_index: 0,
+            chapter_index: 0,
+            chapter_title: "第1章".into(),
+            text: text.clone(),
+            start_line: 0,
+        },
+    )
+    .unwrap();
+    assert_eq!(state.borrow().book_index, 0);
+    assert_eq!(state.borrow().card_line, 0);
+    assert_eq!(reader.get_scroll_offset(), 0.0);
+
+    // 换成另一本书的第 5 章，并指定从第 12 行开始读
+    let other: String = (1..=40)
+        .map(|i| format!("另一本书的第{i}行正文。\n"))
+        .collect();
+    reader_mini::reader_view::activate(
+        &app,
+        &reader,
+        &state,
+        &cfg,
+        reader_mini::reader_view::ShowRequest {
+            book_index: 3,
+            chapter_index: 5,
+            chapter_title: "第5章".into(),
+            text: other.clone(),
+            start_line: 12,
+        },
+    );
+
+    // 窗口内容被整体替换
+    assert_eq!(reader.get_full_text().to_string(), other);
+    assert_eq!(reader.get_title_text().to_string(), "第5章");
+    // 状态同步到新的书 / 章 / 行
+    assert_eq!(state.borrow().book_index, 3);
+    assert_eq!(state.borrow().chapter_index, 5);
+    assert_eq!(state.borrow().card_line, 12);
+    // 滚动位置跟着新位置走，而不是停在开头
+    assert!(reader.get_scroll_offset() < 0.0, "应滚动到指定行");
+    let line_height = reader.get_font_size() * reader.get_line_height_factor();
+    let expected = -((reader_mini::reader_view::row_of(&state.borrow(), 12)) as f32 * line_height);
+    assert_eq!(reader.get_scroll_offset(), expected);
+}
+
+/// 改字号后仍停在原来读到的地方，不会被甩回开头。
+#[test]
+fn apply_style_keeps_reading_position() {
+    i_slint_backend_testing::init_no_event_loop();
+
+    let cfg = reader_mini::config::Config::default();
+    let state = std::rc::Rc::new(std::cell::RefCell::new(
+        reader_mini::reader_view::ReaderState::default(),
+    ));
+    let app = reader_mini::app::AppWindow::new().unwrap();
+    let text: String = (1..=60)
+        .map(|i| format!("第{i}行：改字号不要跳回开头。\n"))
+        .collect();
+    let reader = reader_mini::reader_view::show_reader(
+        &app,
+        &state,
+        &cfg,
+        reader_mini::reader_view::ShowRequest {
+            book_index: 0,
+            chapter_index: 0,
+            chapter_title: "第1章".into(),
+            text: text.clone(),
+            start_line: 20,
+        },
+    )
+    .unwrap();
+    assert_eq!(state.borrow().card_line, 20);
+    let before = reader.get_scroll_offset();
+
+    let mut bigger = cfg.clone();
+    bigger.read_font_size = 28;
+    reader_mini::reader_view::apply_style(&reader, &bigger, &state);
+
+    assert_eq!(reader.get_font_size(), 28.0);
+    assert_eq!(state.borrow().card_line, 20, "改字号不应丢掉阅读位置");
+    assert_ne!(reader.get_scroll_offset(), before, "行高变了，偏移要重算");
+}
+
+/// 快捷键输入框不接收文本，直接听键盘事件拼出配置串。
+#[test]
+fn hotkey_input_comes_from_key_events() {
+    i_slint_backend_testing::init_no_event_loop();
+
+    use slint::ComponentHandle;
+    use slint::platform::{Key, WindowEvent};
+
+    let app = reader_mini::app::AppWindow::new().unwrap();
+    // 设置页
+    app.set_tab(1);
+    let window = app.window();
+    // 布局一次，让捕获框拿到位置
+    window.dispatch_event(WindowEvent::PointerMoved {
+        position: slint::LogicalPosition::new(1.0, 1.0),
+    });
+
+    let send = |event: WindowEvent| window.dispatch_event(event);
+
+    // 点捕获框开始录制
+    let mut clicked = false;
+    for y in [1.0f32, 300.0, 340.0, 380.0, 420.0, 500.0, 520.0] {
+        if clicked {
+            break;
+        }
+        send(WindowEvent::PointerPressed {
+            position: slint::LogicalPosition::new(60.0, y),
+            button: slint::platform::PointerEventButton::Left,
+        });
+        send(WindowEvent::PointerReleased {
+            position: slint::LogicalPosition::new(60.0, y),
+            button: slint::platform::PointerEventButton::Left,
+        });
+        clicked = app.get_capturing();
+    }
+    assert!(clicked, "点击快捷键框应进入录制状态");
+    assert_eq!(app.get_hotkey_input().to_string(), "");
+
+    // 按下 Ctrl+Alt+K：分三次按下，输入框不会把字符当文本收进去
+    send(WindowEvent::KeyPressed {
+        text: Key::Control.into(),
+    });
+    send(WindowEvent::KeyPressed {
+        text: Key::Alt.into(),
+    });
+    send(WindowEvent::KeyPressed {
+        text: Key::K.into(),
+    });
+    let spec = app.get_hotkey_input().to_string();
+    assert_eq!(
+        spec.to_ascii_uppercase(),
+        "CTRL+ALT+K",
+        "按键应被拼成配置串"
+    );
+    // 拼出来的串必须是快捷键解析器认识的写法
+    assert!(
+        reader_mini::hotkey::parse(&spec).is_some(),
+        "{spec} 应当能被解析成全局快捷键"
+    );
+
+    // 单独按修饰键不算一次完整输入，不会把已有键清掉
+    assert!(!app.get_capturing());
+}

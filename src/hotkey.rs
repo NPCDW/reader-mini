@@ -3,6 +3,39 @@
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager};
 
+/// 配置串的规范写法，解析与生成共用，避免两边变形。
+pub const DEFAULT_SPEC: &str = "Ctrl+Alt+R";
+
+/// 把配置串规范化成 `Ctrl+Alt+R` 这种写法：修饰键名统一大小写，主键字母转大写。
+///
+/// 设置页是照着用户真实按下的键拼串的，字母可能是小写（Shift 组合尤其容易），
+/// 落盘前统一一次，免得同一套快捷键出现两种写法。
+pub fn normalize(spec: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for part in spec.split('+') {
+        let p = part.trim();
+        if p.is_empty() {
+            continue;
+        }
+        let lower = p.to_ascii_lowercase();
+        let named = match lower.as_str() {
+            "ctrl" | "control" => Some("Ctrl"),
+            "alt" | "option" => Some("Alt"),
+            "shift" => Some("Shift"),
+            "super" | "meta" | "win" | "cmd" => Some("Super"),
+            _ => None,
+        };
+        out.push(match named {
+            Some(n) => n.to_string(),
+            None if p.chars().count() == 1 && p.chars().all(|c| c.is_ascii_alphabetic()) => {
+                p.to_ascii_uppercase()
+            }
+            None => p.to_string(),
+        });
+    }
+    out.join("+")
+}
+
 /// 解析 "Ctrl+Alt+R" 这类写法。
 ///
 /// 支持 ctrl / control / alt / shift / super / meta / win 作为修饰键，
@@ -27,6 +60,7 @@ pub fn parse(spec: &str) -> Option<HotKey> {
 }
 
 fn key_code(name: &str) -> Option<Code> {
+    // 主键名大小写不敏感：UI 捕获时可能给出小写字母
     let upper = name.to_ascii_uppercase();
     // 单个字母
     if let Some(c) = name.chars().next()
@@ -194,6 +228,18 @@ mod tests {
             "Alt+Ctrl+PgUp",
         ] {
             assert!(parse(spec).is_some(), "{spec} 应当能解析");
+        }
+    }
+
+    #[test]
+    fn normalizes_specs() {
+        assert_eq!(normalize("ctrl+alt+k"), "Ctrl+Alt+K");
+        assert_eq!(normalize("CTRL + ALT + F12"), "Ctrl+Alt+F12");
+        // 命名键 `space` 与 `Space` 等价，主键名保持解析器认识的写法
+        assert!(parse(&normalize("Super+space")).is_some());
+        // 规范化后仍然能被解析
+        for spec in ["ctrl+alt+k", "shift+pgup", "super+space"] {
+            assert!(parse(&normalize(spec)).is_some(), "{spec} 规范化后应可解析");
         }
     }
 

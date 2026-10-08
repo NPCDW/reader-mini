@@ -60,8 +60,9 @@ fn main() -> Result<()> {
         let weak = ui.as_weak();
         let hotkeys = hotkeys.clone();
         let style_target = style_target.clone();
+        let reader_state_for_style = reader_state.clone();
         ui.on_save_settings(move |base, bg, fg, size, spec, line_height| {
-            let spec = spec.to_string();
+            let spec = hotkey::normalize(&spec);
             let mut c = cfg.borrow_mut();
             c.base_url = base.to_string();
             c.read_bg = bg.to_string();
@@ -87,11 +88,12 @@ fn main() -> Result<()> {
             if let Some(app) = weak.upgrade() {
                 app.set_status(msg.into());
                 app.set_hotkey(spec.clone().into());
+                app.set_hotkey_input(spec.clone().into());
             }
-            // 字号 / 颜色改了，已开着的阅读窗口立刻跟着变
+            // 字号 / 颜色改了，已开着的阅读窗口立刻跟着变（并保持当前读到的地方）
             if let Some(reader) = style_target.borrow().upgrade() {
                 let c = cfg.borrow().clone();
-                reader_view::apply_style(&reader, &c);
+                reader_view::apply_style(&reader, &c, &reader_state_for_style);
             }
         });
     }
@@ -178,8 +180,8 @@ fn main() -> Result<()> {
     // 当前阅读窗口 + 原生句柄
     let active: Rc<RefCell<Option<(ReaderWindow, platform::Handle)>>> = Rc::new(RefCell::new(None));
 
-    // 统一打开逻辑：拉正文 -> 建窗 -> 应用上次进度
-    type OpenReader = Rc<dyn Fn(&AppWindow, usize, i64, String)>;
+    // 统一打开/刷新逻辑：拉正文 -> 复用或新建窗口 -> 定位到指定行并呈现
+    type OpenReader = Rc<dyn Fn(&AppWindow, usize, i64, String, usize)>;
     let open_reader: OpenReader = {
         let book_list = book_list.clone();
         let state = state.clone();
@@ -189,9 +191,14 @@ fn main() -> Result<()> {
         let active = active.clone();
         let style_target = style_target.clone();
         Rc::new(
-            move |app: &AppWindow, i: usize, chapter_index: i64, title: String| {
+            move |app: &AppWindow,
+                  i: usize,
+                  chapter_index: i64,
+                  title: String,
+                  start_line: usize| {
                 let bl = book_list.borrow();
                 let Some(book) = bl.get(i).cloned() else {
+                    app.set_status("书架上找不到这本书".into());
                     return;
                 };
                 drop(bl);
@@ -205,11 +212,6 @@ fn main() -> Result<()> {
                     app.set_status("获取正文失败".into());
                     return;
                 };
-                // 恢复上次读到的行
-                let start_line = match progress::recall(i) {
-                    Some(rec) if rec.chapter_index == chapter_index => rec.page,
-                    _ => 0,
-                };
                 let req = reader_view::ShowRequest {
                     book_index: i,
                     chapter_index,
@@ -217,17 +219,30 @@ fn main() -> Result<()> {
                     text,
                     start_line,
                 };
-                match reader_view::show_reader(app, &state, &c, req) {
-                    Ok(r) => {
+                // 已经有阅读窗口就原地刷新（正文 + 定位到 start_line），
+                // 没有才新建；两条路径都走同一个 activate。
+                let existing = active.borrow_mut().take();
+                match existing {
+                    Some((r, h)) => {
+                        reader_view::activate(app, &r, &state, &c, req);
                         let _ = r.show();
-                        let h = platform::handle_of(r.window());
                         *style_target.borrow_mut() = r.as_weak();
                         *active.borrow_mut() = Some((r, h));
                     }
-                    Err(e) => {
-                        app.set_status(format!("打开阅读窗口失败: {e}").into());
-                    }
+                    None => match reader_view::show_reader(app, &state, &c, req) {
+                        Ok(r) => {
+                            let _ = r.show();
+                            let h = platform::handle_of(r.window());
+                            *style_target.borrow_mut() = r.as_weak();
+                            *active.borrow_mut() = Some((r, h));
+                        }
+                        Err(e) => {
+                            app.set_status(format!("打开阅读窗口失败: {e}").into());
+                            return;
+                        }
+                    },
                 }
+                app.set_status(format!("正在阅读《{}》", book.name).into());
             },
         )
     };
@@ -258,19 +273,19 @@ fn main() -> Result<()> {
                     let Some(app) = ui_weak.upgrade() else { return };
                     let idx = *current.borrow();
                     let bl = book_list.borrow();
-                    let (i, chapter_index, title) = if idx >= 0 && (idx as usize) < bl.len() {
+                    let (i, chapter_index, title, line) = if idx >= 0 && (idx as usize) < bl.len() {
                         let b = &bl[idx as usize];
-                        let rec = progress::recall(idx as usize);
-                        match rec {
-                            Some(r) => (idx as usize, r.chapter_index, r.chapter_title),
+                        match progress::recall(idx as usize) {
+                            Some(r) => (idx as usize, r.chapter_index, r.chapter_title, r.page),
                             None => (
                                 idx as usize,
                                 b.dur_chapter_index,
                                 b.dur_chapter_title.clone(),
+                                0,
                             ),
                         }
                     } else if let Some(b) = bl.first() {
-                        (0usize, b.dur_chapter_index, b.dur_chapter_title.clone())
+                        (0usize, b.dur_chapter_index, b.dur_chapter_title.clone(), 0)
                     } else {
                         continue;
                     };
@@ -280,7 +295,7 @@ fn main() -> Result<()> {
                     } else {
                         title
                     };
-                    open_reader(&app, i, chapter_index, title);
+                    open_reader(&app, i, chapter_index, title, line);
                 }
 
                 // 2) 失焦即关闭
@@ -346,16 +361,17 @@ fn main() -> Result<()> {
                 return;
             };
             drop(bl);
-            let (chapter_index, title) = match progress::recall(i) {
-                Some(rec) => (rec.chapter_index, rec.chapter_title),
-                None => (book.dur_chapter_index, book.dur_chapter_title.clone()),
+            let (chapter_index, title, line) = match progress::recall(i) {
+                Some(rec) => (rec.chapter_index, rec.chapter_title, rec.page),
+                None => (book.dur_chapter_index, book.dur_chapter_title.clone(), 0),
             };
             let title = if title.is_empty() {
                 book.name.clone()
             } else {
                 title
             };
-            open_reader(&app, i, chapter_index, title);
+            // 带上"这本书 + 上次读到的位置"，已有窗口会被刷新到该位置
+            open_reader(&app, i, chapter_index, title, line);
         });
     }
 
