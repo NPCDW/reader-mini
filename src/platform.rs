@@ -185,8 +185,9 @@ mod linux {
 #[cfg(target_os = "windows")]
 mod windows {
     use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetKeyState;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetCursorPos, GetForegroundWindow, GetKeyState, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
+        GetCursorPos, GetForegroundWindow, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
     };
 
     pub fn is_focused(hwnd: isize) -> bool {
@@ -195,7 +196,15 @@ mod windows {
 
     pub fn move_to(hwnd: isize, x: i32, y: i32) {
         unsafe {
-            SetWindowPos(hwnd as _, 0, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+            SetWindowPos(
+                hwnd as _,
+                std::ptr::null_mut(),
+                x,
+                y,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER,
+            );
         }
     }
 
