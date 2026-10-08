@@ -1,0 +1,64 @@
+# reader-mini
+
+用 Rust + Slint 写的极简桌面阅读器，面向 Windows / Linux。
+
+## 功能
+
+**主窗口（常规窗口）**
+- 书架页：查看所有图书，一键「阅读」或查看「目录」
+- 设置页：配置 `baseUrl`、阅读窗口背景色 / 字体色 / 字号、全局快捷键
+
+**阅读窗口（浮动窗口）**
+- 无边框、置顶、系统任务栏无图标，类似 ditto 的呼出方式
+- 全局快捷键呼出 / 关闭（默认 `Ctrl+Alt+R`）
+- 失去焦点自动关闭
+- 窗口顶部有拖动条，按住即可任意拖动
+- 可自由缩放，退出时记住窗口尺寸
+- 只显示正文；`PgUp` / `PgDn` 上下翻页
+- 翻下一页时保留当前页最后一行作为下一页第一行
+
+## 接口
+
+| 接口 | 方法 | 说明 |
+| --- | --- | --- |
+| `/getBookshelf` | GET | 获取所有图书 |
+| `/getChapterList?url=<bookUrl>` | GET | 获取一本图书的所有章节 |
+| `/getBookContent?url=<bookUrl>&index=<n>` | GET | 获取正文 |
+| `/saveBookProgress` | POST | 保存阅读进度 |
+
+阅读进度除了同步到服务端，也会在本地记录每本书读到哪一页，下次直接续读。
+
+## 构建
+
+需要 Rust（stable）、C 编译器，以及 Slint 的构建依赖：`fontconfig`、`freetype`、`xkbcommon`、`libx11` 等。
+
+```bash
+# Debian / Ubuntu
+sudo apt-get install -y build-essential pkg-config cmake \
+  libfontconfig1-dev libfreetype6-dev libxkbcommon-dev libxkbcommon-x11-dev \
+  libx11-dev libxcb1-dev libgl1-mesa-dev libegl1-mesa-dev libssl-dev
+
+cargo build --release
+```
+
+Windows 下用 MSVC 工具链直接 `cargo build --release` 即可。
+
+## 运行与验证
+
+```bash
+cargo test          # 单测 + e2e（含分页与阅读窗口翻页）
+cargo run           # 启动应用
+```
+
+## 代码结构
+
+```
+ui/app.slint        主窗口
+ui/reader_win.slint 阅读窗口
+src/api.rs          接口客户端 + 分页算法
+src/config.rs       配置读写
+src/progress.rs     阅读进度本地记录
+src/platform.rs     平台层：拖动、失焦检测
+src/reader_view.rs  阅读窗口逻辑
+src/main.rs         应用装配与主循环
+```

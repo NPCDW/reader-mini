@@ -1,0 +1,121 @@
+import { ScrollView } from "std-widgets.slint";
+
+export component ReaderWindow inherits Window {
+    title: "reader-mini-reader";
+    width: 460px;
+    height: 560px;
+    no-frame: true;
+    always-on-top: true;
+
+    in-out property <brush> bg: #f5f0e1;
+    in-out property <brush> fg: #333333;
+    in property <length> font-size: 20px;
+    in property <string> page-text: "";
+    in property <string> page-info: "";
+    in property <string> title-text: "";
+
+    callback next-page();
+    callback prev-page();
+    callback closed();
+    callback drag-start();
+    callback dragging();
+    callback drag-end();
+
+    background: bg;
+
+    VerticalLayout {
+        Rectangle {
+            height: 26px;
+            background: transparent;
+            HorizontalLayout {
+                Rectangle {
+                    horizontal-stretch: 1;
+                    Text {
+                        text: "⠿ " + root.title-text;
+                        color: root.fg;
+                        opacity: 0.35;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                    TouchArea {
+                        mouse-cursor: grab;
+                        pointer-event(e) => {
+                            if (e.kind == PointerEventKind.down) { root.drag-start(); }
+                            if (e.kind == PointerEventKind.move) { root.dragging(); }
+                            if (e.kind == PointerEventKind.up) { root.drag-end(); }
+                        }
+                    }
+                }
+                Rectangle {
+                    width: 28px;
+                    Text {
+                        text: "✕";
+                        color: root.fg;
+                        opacity: 0.45;
+                        font-size: 13px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    TouchArea { clicked => { root.closed(); } }
+                }
+            }
+        }
+
+        ScrollView {
+            VerticalLayout {
+                padding-left: 18px;
+                padding-right: 18px;
+                padding-top: 4px;
+                padding-bottom: 6px;
+                alignment: start;
+                Text {
+                    text: root.page-text;
+                    color: root.fg;
+                    font-size: root.font-size;
+                    wrap: word-wrap;
+                    width: 100%;
+                }
+            }
+        }
+
+        Rectangle {
+            height: 24px;
+            background: transparent;
+            HorizontalLayout {
+                Rectangle {
+                    width: 60px;
+                    Text {
+                        text: "PgUp";
+                        color: root.fg;
+                        opacity: 0.5;
+                        font-size: 11px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    TouchArea { clicked => { root.prev-page(); } }
+                }
+                Rectangle {
+                    width: 60px;
+                    Text {
+                        text: "PgDn";
+                        color: root.fg;
+                        opacity: 0.5;
+                        font-size: 11px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    TouchArea { clicked => { root.next-page(); } }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Text {
+                    text: root.page-info;
+                    color: root.fg;
+                    opacity: 0.45;
+                    font-size: 11px;
+                    horizontal-alignment: right;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}

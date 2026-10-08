@@ -1,0 +1,203 @@
+import { ReaderWindow } from "reader_win.slint";
+import { VerticalBox, HorizontalBox, ScrollView, Button } from "std-widgets.slint";
+
+export struct BookItem {
+    name: string,
+    author: string,
+    intro: string,
+    progress-text: string,
+    latest: string,
+}
+
+export struct ChapterItem {
+    title: string,
+    index: int,
+}
+
+export component AppWindow inherits Window {
+    title: "reader-mini";
+    width: 1000px;
+    height: 680px;
+    background: #f5f5f7;
+
+    in property <[BookItem]> books;
+    in property <[ChapterItem]> chapters;
+    in-out property <int> tab: 0;
+    in-out property <int> page: 0;
+    in-out property <int> current-book: -1;
+    in-out property <string> base-url: "";
+    in-out property <string> read-bg: "#f5f0e1";
+    in-out property <string> read-fg: "#333333";
+    in-out property <int> read-font-size: 20;
+    in-out property <string> font-size-text: "20";
+    in property <string> hotkey: "Ctrl+Alt+R";
+    in-out property <string> status: "";
+    in property <bool> loading: false;
+
+    callback open-book(int);
+    callback open-toc(int);
+    callback save-settings(string, string, string, int);
+    callback refresh();
+
+    VerticalLayout {
+        HorizontalLayout {
+            height: 48px;
+            padding: 6px;
+            spacing: 6px;
+            Rectangle {
+                width: 88px;
+                background: tab == 0 ? #4a6fa5 : #e3e6ea;
+                border-radius: 6px;
+                Text {
+                    text: "书架";
+                    color: tab == 0 ? white : #444;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                TouchArea { clicked => { root.tab = 0; } }
+            }
+            Rectangle {
+                width: 88px;
+                background: tab == 1 ? #4a6fa5 : #e3e6ea;
+                border-radius: 6px;
+                Text {
+                    text: "设置";
+                    color: tab == 1 ? white : #444;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                TouchArea { clicked => { root.tab = 1; } }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Rectangle {
+                width: 96px;
+                background: #e3e6ea;
+                border-radius: 6px;
+                Text {
+                    text: root.loading ? "加载中…" : "刷新";
+                    color: #333;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                TouchArea { clicked => { if (!root.loading) { root.refresh(); } } }
+            }
+        }
+
+        if root.tab == 0 : VerticalLayout {
+            if root.page == 0 : ScrollView {
+                VerticalLayout {
+                    padding: 10px;
+                    spacing: 8px;
+                    for book[i] in root.books : Rectangle {
+                        height: 100px;
+                        background: white;
+                        border-radius: 8px;
+                        border-width: 1px;
+                        border-color: #e0e0e0;
+                        HorizontalLayout {
+                            padding: 10px;
+                            spacing: 10px;
+                            VerticalLayout {
+                                alignment: start;
+                                spacing: 2px;
+                                Text { text: book.name; font-size: 18px; color: #222; }
+                                Text { text: book.author + " · " + book.latest; font-size: 12px; color: #888; }
+                                Text { text: book.progress-text; font-size: 12px; color: #4a6fa5; }
+                                Text { text: book.intro; font-size: 12px; color: #666; wrap: word-wrap; vertical-stretch: 1; overflow: elide; }
+                            }
+                            VerticalLayout {
+                                width: 130px;
+                                spacing: 6px;
+                                alignment: start;
+                                Rectangle {
+                                    height: 34px;
+                                    background: #4a6fa5;
+                                    border-radius: 6px;
+                                    Text { text: "阅读"; color: white; horizontal-alignment: center; vertical-alignment: center; }
+                                    TouchArea { clicked => { root.open-book(i); } }
+                                }
+                                Rectangle {
+                                    height: 34px;
+                                    background: #e3e6ea;
+                                    border-radius: 6px;
+                                    Text { text: "目录"; color: #333; horizontal-alignment: center; vertical-alignment: center; }
+                                    TouchArea { clicked => { root.page = 1; root.current-book = i; root.open-toc(i); } }
+                                }
+                            }
+                        }
+                    }
+                    if root.books.length == 0 : Text {
+                        text: root.loading ? "正在获取书架…" : "书架为空：请先在「设置」里填写 baseUrl，再点刷新";
+                        color: #999;
+                        horizontal-alignment: center;
+                    }
+                }
+            }
+            if root.page == 1 : VerticalLayout {
+                padding: 10px;
+                spacing: 8px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle {
+                        width: 88px;
+                        height: 32px;
+                        background: #e3e6ea;
+                        border-radius: 6px;
+                        Text { text: "← 返回"; color: #333; horizontal-alignment: center; vertical-alignment: center; }
+                        TouchArea { clicked => { root.page = 0; } }
+                    }
+                    Text { text: "目录"; font-size: 16px; color: #222; vertical-alignment: center; }
+                }
+                ScrollView {
+                    VerticalLayout {
+                        spacing: 4px;
+                        for ch[i] in root.chapters : Rectangle {
+                            height: 36px;
+                            background: white;
+                            border-radius: 6px;
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                alignment: start;
+                                Text { text: ch.title; color: #333; vertical-alignment: center; }
+                            }
+                            TouchArea { clicked => { root.page = 0; } }
+                        }
+                        if root.chapters.length == 0 : Text { text: "暂无目录"; color: #999; horizontal-alignment: center; }
+                    }
+                }
+            }
+        }
+
+        if root.tab == 1 : ScrollView {
+            VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+                alignment: start;
+                Text { text: "服务地址 baseUrl"; font-size: 14px; color: #333; width: 100%; }
+                TextInput { text <=> root.base-url; height: 36px; font-size: 14px; width: 100%; }
+                Text { text: "阅读窗口：背景色 / 字体色 / 字号"; font-size: 14px; color: #333; width: 100%; }
+                HorizontalLayout {
+                    spacing: 10px;
+                    TextInput { text <=> root.read-bg; height: 36px; font-size: 14px; horizontal-stretch: 1; }
+                    TextInput { text <=> root.read-fg; height: 36px; font-size: 14px; horizontal-stretch: 1; }
+                    TextInput {
+                        text: root.font-size-text;
+                        height: 36px;
+                        font-size: 14px;
+                        input-type: number;
+                        horizontal-stretch: 1;
+                        edited => { root.read-font-size = self.text.to-float(); }
+                    }
+                }
+                Text { text: "阅读窗口快捷键：" + root.hotkey + "（全局，重启后生效）"; font-size: 13px; color: #777; width: 100%; }
+                Button {
+                    text: "保存设置";
+                    width: 140px;
+                    height: 36px;
+                    clicked => { root.save-settings(root.base-url, root.read-bg, root.read-fg, root.read-font-size); }
+                }
+                Text { text: root.status; color: #4a6fa5; font-size: 13px; width: 100%; }
+            }
+        }
+    }
+}
