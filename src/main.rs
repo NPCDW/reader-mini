@@ -1,6 +1,6 @@
 use reader_mini::app::{AppWindow, BookItem, ChapterItem};
 use reader_mini::reader_win::ReaderWindow;
-use reader_mini::{api, config, hotkey, net, platform, progress, reader_view};
+use reader_mini::{api, config, hotkey, net, platform, progress, reader_view, tray};
 
 use anyhow::Result;
 use slint::{ModelRc, VecModel};
@@ -306,12 +306,18 @@ fn main() -> Result<()> {
                     // 与「阅读」按钮同一套续读规则：章节听服务端的，行号听本地的
                     let (i, chapter_index, title, line) = if idx >= 0 && (idx as usize) < bl.len() {
                         let b = &bl[idx as usize];
-                        let r =
-                            progress::resume(&b.book_url, b.dur_chapter_index, &b.dur_chapter_title);
+                        let r = progress::resume(
+                            &b.book_url,
+                            b.dur_chapter_index,
+                            &b.dur_chapter_title,
+                        );
                         (idx as usize, r.0, r.1, r.2)
                     } else if let Some(b) = bl.first() {
-                        let r =
-                            progress::resume(&b.book_url, b.dur_chapter_index, &b.dur_chapter_title);
+                        let r = progress::resume(
+                            &b.book_url,
+                            b.dur_chapter_index,
+                            &b.dur_chapter_title,
+                        );
                         (0usize, r.0, r.1, r.2)
                     } else {
                         continue;
@@ -335,8 +341,8 @@ fn main() -> Result<()> {
                         }
                     };
                     if !focused {
-                        // 拖动过程中鼠标仍按下时不要关闭
-                        let dragging = state.borrow().drag_origin.is_some();
+                        // 拖动 / 拉伸过程中鼠标仍按下时不要关闭
+                        let dragging = state.borrow().interacting();
                         if !dragging && !platform::left_button_down() {
                             if let Some((r, _)) = active.borrow_mut().take() {
                                 r.invoke_closed();
@@ -383,6 +389,76 @@ fn main() -> Result<()> {
         ));
     }
 
+    // 本章翻到头：PgDn -> 下一章，PgUp -> 上一章。
+    // 目录还没拉过时顺手拉一次，这样从书架直接点「阅读」也能连着往下翻。
+    {
+        let open_reader = open_reader.clone();
+        let chapters = chapters.clone();
+        let books = books.clone();
+        let cfg = cfg.clone();
+        let client = client.clone();
+        let rt_handle = rt.handle().clone();
+        let current = current.clone();
+        let state = state.clone();
+        let active = active.clone();
+        let weak = ui.as_weak();
+        reader_view::set_chapter_hook(Rc::new(move |direction: i32| {
+            let Some(app) = weak.upgrade() else {
+                return;
+            };
+            let book_idx = *current.borrow();
+            if book_idx < 0 {
+                app.set_status("请先从书架打开一本书的目录".into());
+                return;
+            }
+            // 目录为空（没点过「目录」）就先补一次，否则不知道下一章是哪一个
+            if chapters.borrow().is_empty() {
+                let Some(book) = books.borrow().get(book_idx as usize).cloned() else {
+                    return;
+                };
+                let c = cfg.borrow().clone();
+                match rt_handle.block_on(api::get_chapter_list(
+                    &client,
+                    &c.base_url,
+                    &book.book_url,
+                )) {
+                    Ok(list) => *chapters.borrow_mut() = list,
+                    Err(e) => {
+                        app.set_status(format!("获取目录失败: {e}").into());
+                        return;
+                    }
+                }
+            }
+            let target = state.borrow().chapter_index + direction as i64;
+            let cl = chapters.borrow();
+            if target < 0 || target as usize >= cl.len() {
+                app.set_status(
+                    if direction > 0 {
+                        "已经是最后一章"
+                    } else {
+                        "已经是第一章"
+                    }
+                    .into(),
+                );
+                return;
+            }
+            let title = cl[target as usize].title.clone();
+            drop(cl);
+            let title = if title.is_empty() {
+                format!("第{}章", target + 1)
+            } else {
+                title
+            };
+            open_reader(&app, book_idx as usize, target, title, 0);
+            // 往回翻：落在上一章的最后一页，接着往回读
+            if direction < 0
+                && let Some((r, _)) = active.borrow().as_ref()
+            {
+                reader_view::goto_last_page(r, &state);
+            }
+        }));
+    }
+
     // 书架页“阅读”按钮：走统一打开逻辑
     {
         let open_reader = open_reader.clone();
@@ -414,6 +490,48 @@ fn main() -> Result<()> {
         });
     }
 
-    ui.run()?;
+    // 系统托盘：主窗口关掉后程序留在后台，靠托盘图标唤回来。
+    // 托盘起不来（比如桌面没有托盘宿主）就退回老行为：关窗口即退出。
+    let _tray = {
+        let weak = ui.as_weak();
+        let open_window = move || {
+            if let Some(app) = weak.upgrade() {
+                let _ = app.show();
+            }
+        };
+        let tx = tx.clone();
+        let toggle_reader = move || {
+            let _ = tx.send(HotkeyMsg::Toggle);
+        };
+        let active = active.clone();
+        let quit = move || {
+            // 退出前把阅读窗口收掉，进度写回服务端
+            if let Some((r, _)) = active.borrow_mut().take() {
+                r.invoke_closed();
+            }
+            let _ = slint::quit_event_loop();
+        };
+        match tray::setup(open_window, toggle_reader, quit) {
+            Ok(t) => {
+                // 关主窗口只是藏起来，不停事件循环
+                ui.window()
+                    .on_close_requested(|| slint::CloseRequestResponse::HideWindow);
+                Some(t)
+            }
+            Err(e) => {
+                eprintln!("系统托盘不可用，关闭窗口将直接退出: {e}");
+                None
+            }
+        }
+    };
+
+    ui.show()?;
+    if _tray.is_some() {
+        // 有托盘：一直跑到菜单里点“退出”为止，窗口都关了也不退出
+        slint::run_event_loop_until_quit()?;
+    } else {
+        // 没托盘：退回老行为，最后一个窗口关掉就结束
+        slint::run_event_loop()?;
+    }
     Ok(())
 }

@@ -5,4 +5,7 @@ fn main() {
     // 阅读窗口：单独生成 reader_win.rs，用显式 include! 引入
     slint_build::compile_with_config("ui/reader_win.slint", cfg())
         .expect("slint build failed: reader_win.slint");
+    // 系统托盘：生成 tray.rs
+    slint_build::compile_with_config("ui/tray.slint", cfg())
+        .expect("slint build failed: tray.slint");
 }

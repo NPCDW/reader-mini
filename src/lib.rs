@@ -12,6 +12,12 @@ pub mod reader_win {
     include!(concat!(env!("OUT_DIR"), "/reader_win.rs"));
 }
 
+/// 系统托盘 UI 绑定（由 ui/tray.slint 生成）
+pub mod tray_win {
+    #![allow(clippy::all)]
+    include!(concat!(env!("OUT_DIR"), "/tray.rs"));
+}
+
 pub mod api;
 pub mod config;
 pub mod hotkey;
@@ -19,6 +25,7 @@ pub mod net;
 pub mod platform;
 pub mod progress;
 pub mod reader_view;
+pub mod tray;
 
 /// 供集成测试调用的分页入口
 pub fn paginate_for_test(text: &str, chars_per_page: usize) -> Vec<String> {

@@ -1,11 +1,52 @@
-// 阅读窗口：全文一次性渲染，不切页；左侧滚动条看进度，
-import { ScrollView } from "std-widgets.slint";
-// PgUp / PgDn 按“可视行”滚动，滚动后至少保留一行重叠（下一页首行 == 上一页末行）。
+// 阅读窗口：整章正文一次铺满，没有滚动条；按窗口大小折行并算出本章一共几页，
+// PgUp / PgDn 一屏一屏翻，相邻两屏首尾相接 —— 不重叠、也不会把一行切一半；
+// 本章最后一页再按 PgDn 会翻到下一章，第一页再按 PgUp 会翻到上一章。
+
+// 拉伸手柄：贴边 / 贴角的一条透明区域。按下后把「拉的是哪条边」交给 Rust，
+// 之后的鼠标位移也由 Rust 读系统鼠标位置换算成新的窗口位置与尺寸。
+// edge-x / edge-y：-1 = 左 / 上，1 = 右 / 下，0 = 这一维不动。
+component ResizeGrip inherits Rectangle {
+    in property <int> edge-x: 0;
+    in property <int> edge-y: 0;
+
+    callback resize-start(int, int);
+    callback resizing();
+    callback resize-end();
+
+    background: transparent;
+
+    TouchArea {
+        width: 100%;
+        height: 100%;
+        mouse-cursor: root.edge-x == 0
+            ? MouseCursor.ns-resize
+            : (root.edge-y == 0
+                ? MouseCursor.ew-resize
+                : (root.edge-x == root.edge-y ? MouseCursor.nwse-resize : MouseCursor.nesw-resize));
+
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down) {
+                root.resize-start(root.edge-x, root.edge-y);
+            }
+            if (e.kind == PointerEventKind.move) {
+                root.resizing();
+            }
+            if (e.kind == PointerEventKind.up) {
+                root.resize-end();
+            }
+        }
+    }
+}
 
 export component ReaderWindow inherits Window {
     title: "reader-mini-reader";
-    width: 460px;
-    height: 560px;
+    // 窗口尺寸做成属性：Rust 改这两个值就能拉伸窗口。
+    // 它们同时是布局约束（min == max），系统侧的尺寸和 UI 侧始终一致，
+    // 免得窗口被系统拽回初始尺寸。
+    in-out property <length> win-width: 460px;
+    in-out property <length> win-height: 560px;
+    width: root.win-width;
+    height: root.win-height;
     no-frame: true;
     always-on-top: true;
 
@@ -14,11 +55,16 @@ export component ReaderWindow inherits Window {
     in property <length> font-size: 20px;
     // 行高倍数（相对字号），换算可视行数用
     in property <float> line-height-factor: 1.5;
-    // 当前正文在滚动视口里的偏移：向下滚动时为负值（Slint content-y 语义）
+    // 当前正文的纵向偏移：向下滚动时为负值（正文上移）
     in-out property <length> scroll-offset: 0px;
-    // 正文可视区高度。Slint 的 Window 没暴露尺寸变化回调，这里让
-    // ScrollView 自己把 visible-height 写回来（只读，避免自绑定死循环）。
-    out property <length> body-height: 0px;
+    // 正文可视区尺寸：由 Rust 按窗口尺寸写入（一屏几行、一行几字都由此推出）
+    in-out property <length> body-height: 0px;
+    in-out property <length> body-width: 0px;
+    // 正文顶部内边距：正文从这里开始画，算「一屏几行」时也要先扣掉
+    in-out property <length> body-top-pad: 4px;
+    // 量高度用的文本：写进 measure-text，再从 measured-height 读回 Slint 量出来的高度
+    in property <string> measure-text: "";
+    in-out property <length> measured-height: measure.height;
     in property <string> full-text: "";
     in property <string> page-info: "";
     in property <string> title-text: "";
@@ -28,6 +74,10 @@ export component ReaderWindow inherits Window {
     callback drag-start();
     callback dragging();
     callback drag-end();
+    // 拉伸窗口：两个参数是被拉的那条边（-1 = 左 / 上，1 = 右 / 下，0 = 这一维不动）
+    callback resize-start(int, int);
+    callback resizing();
+    callback resize-end();
 
     background: bg;
 
@@ -94,31 +144,24 @@ export component ReaderWindow inherits Window {
             }
         }
 
-        // 正文区：ScrollView 自带滚动条，content-y 直连 scroll-offset，
-        // Rust 侧改这个值就能精确定位到行。
-        body := ScrollView {
-            content-y <=> root.scroll-offset;
-            // 可视高度由 Rust 直接按窗口尺寸推算，这里只把实际值回传用于显示
-            init => { root.body-height = self.visible-height; }
-            VerticalLayout {
-                padding-left: 18px;
-                padding-right: 18px;
-                padding-top: 4px;
-                padding-bottom: 6px;
-                alignment: start;
-                Text {
-                    text: root.full-text;
-                    color: root.fg;
-                    font-size: root.font-size;
-                    wrap: word-wrap;
-                    width: 100%;
-                    line-height-factor: root.line-height-factor;
-                }
+        // 正文区：不用 ScrollView —— 它自带滚动条。这里自己裁剪 + 偏移：
+        // 偏移由 Rust 按「页」算好写进 scroll-offset，UI 只负责把它画出来。
+        Rectangle {
+            vertical-stretch: 1;
+            clip: true;
+            Text {
+                x: 18px;
+                y: root.scroll-offset + root.body-top-pad;
+                width: parent.width - 36px;
+                text: root.full-text;
+                color: root.fg;
+                font-size: root.font-size;
+                wrap: word-wrap;
+                line-height-factor: root.line-height-factor;
             }
         }
 
-        // 底部：PgUp / PgDn 按行翻动，不能直接改 scroll-offset（ScrollView 内部会重算），
-        // 所以这里只把信号丢给 Rust，由 Rust 按行坐标定位。
+        // 底部：PgUp / PgDn 也可以点，翻页逻辑统一交给 Rust（本章翻到头会换章）。
         Rectangle {
             height: 24px;
             background: transparent;
@@ -158,5 +201,109 @@ export component ReaderWindow inherits Window {
                 }
             }
         }
+    }
+
+    // ---- 量高度的探针 ----
+    // 不显示（opacity 0），只为让 Slint 算「这段字在正文宽度下有多高」：
+    // Rust 把要量的文本写进 measure-text，再读 measured-height，
+    // 行高 / 整章行数 / 某一行在第几行都由它算出来，不再靠字号估算。
+    measure := Text {
+        x: 0;
+        y: 0;
+        width: root.body-width > 40px ? root.body-width - 36px : 100px;
+        text: root.measure-text;
+        font-size: root.font-size;
+        line-height-factor: root.line-height-factor;
+        wrap: word-wrap;
+        opacity: 0;
+    }
+
+    // ---- 拉伸手柄 ----
+    // 放在最后 = 处于最上层：窗口边缘优先响应拉伸，而不是正文 / 标题栏。
+    // 顶边刻意让开右上角 30px，免得盖住关闭按钮。
+    ResizeGrip {
+        x: 0;
+        y: 16px;
+        width: 6px;
+        height: root.height - 32px;
+        edge-x: -1;
+        resize-start(ex, ey) => { root.resize-start(ex, ey); }
+        resizing => { root.resizing(); }
+        resize-end => { root.resize-end(); }
+    }
+    ResizeGrip {
+        x: root.width - 6px;
+        y: 16px;
+        width: 6px;
+        height: root.height - 32px;
+        edge-x: 1;
+        resize-start(ex, ey) => { root.resize-start(ex, ey); }
+        resizing => { root.resizing(); }
+        resize-end => { root.resize-end(); }
+    }
+    ResizeGrip {
+        x: 16px;
+        y: 0;
+        width: root.width - 46px;
+        height: 6px;
+        edge-y: -1;
+        resize-start(ex, ey) => { root.resize-start(ex, ey); }
+        resizing => { root.resizing(); }
+        resize-end => { root.resize-end(); }
+    }
+    ResizeGrip {
+        x: 16px;
+        y: root.height - 6px;
+        width: root.width - 32px;
+        height: 6px;
+        edge-y: 1;
+        resize-start(ex, ey) => { root.resize-start(ex, ey); }
+        resizing => { root.resizing(); }
+        resize-end => { root.resize-end(); }
+    }
+    ResizeGrip {
+        x: 0;
+        y: 0;
+        width: 16px;
+        height: 16px;
+        edge-x: -1;
+        edge-y: -1;
+        resize-start(ex, ey) => { root.resize-start(ex, ey); }
+        resizing => { root.resizing(); }
+        resize-end => { root.resize-end(); }
+    }
+    ResizeGrip {
+        x: 0;
+        y: root.height - 16px;
+        width: 16px;
+        height: 16px;
+        edge-x: -1;
+        edge-y: 1;
+        resize-start(ex, ey) => { root.resize-start(ex, ey); }
+        resizing => { root.resizing(); }
+        resize-end => { root.resize-end(); }
+    }
+    ResizeGrip {
+        x: root.width - 16px;
+        y: root.height - 16px;
+        width: 16px;
+        height: 16px;
+        edge-x: 1;
+        edge-y: 1;
+        resize-start(ex, ey) => { root.resize-start(ex, ey); }
+        resizing => { root.resizing(); }
+        resize-end => { root.resize-end(); }
+    }
+
+    // 右下角画个小三角，提示这里可以按住拉伸
+    Path {
+        x: root.width - 15px;
+        y: root.height - 15px;
+        width: 10px;
+        height: 10px;
+        commands: "M 0 10 L 10 0 M 5 10 L 10 5";
+        stroke: root.fg;
+        stroke-width: 1px;
+        opacity: 0.28;
     }
 }
