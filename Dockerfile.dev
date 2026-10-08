@@ -1,0 +1,19 @@
+# 开发/CI 环境：Slint 构建依赖 + Rust 工具链
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential pkg-config cmake curl ca-certificates git \
+    libfontconfig1-dev libfreetype6-dev \
+    libxkbcommon-dev libxkbcommon-x11-dev libx11-dev libxcb1-dev \
+    libgl1-mesa-dev libegl1-mesa-dev libssl-dev \
+    xvfb libxcursor1 libxrandr2 libxi6 libxinerama1 libxext6 libxrender1 libxfixes3 \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
+ENV PATH=/usr/local/cargo/bin:$PATH
+RUN curl -sSf https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init -o /tmp/rustup-init \
+    && chmod +x /tmp/rustup-init \
+    && /tmp/rustup-init -y --no-modify-path --profile minimal \
+    && rm /tmp/rustup-init
+
+WORKDIR /workspace
