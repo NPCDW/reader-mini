@@ -247,6 +247,36 @@ fn main() -> Result<()> {
         )
     };
 
+    // 目录页点章节：打开阅读窗口，并从该章正文最开始处读起
+    {
+        let open_reader = open_reader.clone();
+        let weak = ui.as_weak();
+        let chapters = chapters.clone();
+        let current = current.clone();
+        ui.on_open_chapter(move |idx| {
+            let Some(app) = weak.upgrade() else { return };
+            let book_idx = app.get_current_book();
+            if book_idx < 0 {
+                app.set_status("请先从书架打开一本书的目录".into());
+                return;
+            }
+            let cl = chapters.borrow();
+            let Some(ch) = cl.get(idx as usize).cloned() else {
+                return;
+            };
+            drop(cl);
+            // 这本书成为"当前书"，之后按快捷键继续读也是它
+            *current.borrow_mut() = book_idx as i64;
+            let title = if ch.title.is_empty() {
+                "当前章节".into()
+            } else {
+                ch.title.clone()
+            };
+            // start_line = 0：定位到正文最开始处
+            open_reader(&app, book_idx as usize, idx as i64, title, 0);
+        });
+    }
+
     // 快捷键轮询 + 失焦自动关闭
     let timer = slint::Timer::default();
     {
@@ -273,19 +303,16 @@ fn main() -> Result<()> {
                     let Some(app) = ui_weak.upgrade() else { return };
                     let idx = *current.borrow();
                     let bl = book_list.borrow();
+                    // 与「阅读」按钮同一套续读规则：章节听服务端的，行号听本地的
                     let (i, chapter_index, title, line) = if idx >= 0 && (idx as usize) < bl.len() {
                         let b = &bl[idx as usize];
-                        match progress::recall(idx as usize) {
-                            Some(r) => (idx as usize, r.chapter_index, r.chapter_title, r.page),
-                            None => (
-                                idx as usize,
-                                b.dur_chapter_index,
-                                b.dur_chapter_title.clone(),
-                                0,
-                            ),
-                        }
+                        let r =
+                            progress::resume(&b.book_url, b.dur_chapter_index, &b.dur_chapter_title);
+                        (idx as usize, r.0, r.1, r.2)
                     } else if let Some(b) = bl.first() {
-                        (0usize, b.dur_chapter_index, b.dur_chapter_title.clone(), 0)
+                        let r =
+                            progress::resume(&b.book_url, b.dur_chapter_index, &b.dur_chapter_title);
+                        (0usize, r.0, r.1, r.2)
                     } else {
                         continue;
                     };
@@ -322,28 +349,38 @@ fn main() -> Result<()> {
         );
     }
 
-    // 关闭阅读窗口时，把进度同步给服务端
+    // 关闭阅读窗口时，把进度同步给服务端，同时更新内存里的书架
     {
         let books_hook = books.clone();
         let cfg_hook = cfg.clone();
         let client_hook = client.clone();
         let rt_hook = rt.handle().clone();
-        reader_view::set_close_hook(Rc::new(move |book_index, chapter_index, chapter_title| {
-            let bl = books_hook.borrow();
-            let Some(book) = bl.get(book_index).cloned() else {
-                return;
-            };
-            drop(bl);
-            let c = cfg_hook.borrow().clone();
-            let _ = rt_hook.block_on(api::save_book_progress(
-                &client_hook,
-                &c.base_url,
-                &book,
-                chapter_index,
-                0,
-                &chapter_title,
-            ));
-        }));
+        reader_view::set_close_hook(Rc::new(
+            move |book_index, chapter_index, chapter_title, line| {
+                let bl = books_hook.borrow();
+                let Some(book) = bl.get(book_index).cloned() else {
+                    return;
+                };
+                drop(bl);
+                let c = cfg_hook.borrow().clone();
+                let _ = rt_hook.block_on(api::save_book_progress(
+                    &client_hook,
+                    &c.base_url,
+                    &book,
+                    chapter_index,
+                    0,
+                    &chapter_title,
+                ));
+                // 本地只记「这一章读到第几行」，键用 bookUrl，书架重排也不会串书
+                progress::remember(&book.book_url, chapter_index, chapter_title.clone(), line);
+                // 刚写回服务端的就是最新进度：同步到内存书架，
+                // 免得下次点「阅读」又被刷新前的旧值拽回去
+                if let Some(b) = books_hook.borrow_mut().get_mut(book_index) {
+                    b.dur_chapter_index = chapter_index;
+                    b.dur_chapter_title = chapter_title;
+                }
+            },
+        ));
     }
 
     // 书架页“阅读”按钮：走统一打开逻辑
@@ -361,10 +398,12 @@ fn main() -> Result<()> {
                 return;
             };
             drop(bl);
-            let (chapter_index, title, line) = match progress::recall(i) {
-                Some(rec) => (rec.chapter_index, rec.chapter_title, rec.page),
-                None => (book.dur_chapter_index, book.dur_chapter_title.clone(), 0),
-            };
+            // 读服务端给的「正在阅读的章节」；本地只补上同一章里读到第几行
+            let (chapter_index, title, line) = progress::resume(
+                &book.book_url,
+                book.dur_chapter_index,
+                &book.dur_chapter_title,
+            );
             let title = if title.is_empty() {
                 book.name.clone()
             } else {

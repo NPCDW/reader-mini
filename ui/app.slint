@@ -76,6 +76,8 @@ export component AppWindow inherits Window {
 
     callback open-book(int);
     callback open-toc(int);
+    // 目录页点击某个章节：从该章正文开头开始阅读
+    callback open-chapter(int);
     callback save-settings(string, string, string, int, string, float);
     callback refresh();
 
@@ -193,14 +195,15 @@ export component AppWindow inherits Window {
                         spacing: 4px;
                         for ch[i] in root.chapters : Rectangle {
                             height: 36px;
-                            background: white;
+                            background: touch.has-hover ? #eef2f8 : white;
                             border-radius: 6px;
                             HorizontalLayout {
                                 padding-left: 10px;
                                 alignment: start;
                                 Text { text: ch.title; color: #333; vertical-alignment: center; }
                             }
-                            TouchArea { clicked => { root.page = 0; } }
+                            // 点章节 = 打开阅读窗口并跳到该章正文开头；停在目录页方便接着换章
+                            touch := TouchArea { clicked => { root.open-chapter(ch.index); } }
                         }
                         if root.chapters.length == 0 : Text { text: "暂无目录"; color: #999; horizontal-alignment: center; }
                     }

@@ -140,10 +140,8 @@ pub async fn get_chapter_list(
         .await?
         .text()
         .await?;
-    Ok(unwrap_resp::<Vec<Chapter>>(&text)?
-        .into_iter()
-        .filter(|c| !c.title.is_empty())
-        .collect())
+    // 这里不能过滤：返回的下标就是 `getBookContent` 的 index，缺一个都会整章错位
+    unwrap_resp::<Vec<Chapter>>(&text)
 }
 
 pub async fn get_book_content(

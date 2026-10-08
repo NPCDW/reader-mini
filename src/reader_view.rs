@@ -8,8 +8,8 @@ use std::rc::Rc;
 /// 每行最多显示的字数。窗口定宽，按字号估算列数，用于「光标行 -> 断行行号」换算。
 pub const LINE_CHARS_PER_ROW: f32 = 19.0;
 
-/// 关闭阅读窗口时的额外钩子：(book_index, chapter_index, chapter_title)
-pub type CloseHook = dyn Fn(usize, i64, String);
+/// 关闭阅读窗口时的额外钩子：(book_index, chapter_index, chapter_title, 停在第几行)
+pub type CloseHook = dyn Fn(usize, i64, String, usize);
 
 thread_local! {
     static CLOSE_HOOK: RefCell<Option<std::rc::Rc<CloseHook>>> = RefCell::new(None);
@@ -326,10 +326,10 @@ fn wire_reader(
             };
             let _ = r.hide();
             st.borrow_mut().visible = false;
-            crate::progress::remember(snap.0, snap.1, snap.2.clone(), snap.3);
-            // 通过回调把进度同步到服务端（由 main.rs 提供实现）
+            // 通过回调把进度同步到服务端并落到本地（由 main.rs 提供实现）：
+            // 记哪一章、哪一行都交给 main，它手上有 bookUrl 能当键
             if let Some(cb) = CLOSE_HOOK.with(|c| c.borrow().clone()) {
-                cb(snap.0, snap.1, snap.2);
+                cb(snap.0, snap.1, snap.2, snap.3);
             }
         }
     });
@@ -402,10 +402,13 @@ pub fn books_model(books: &[crate::api::Book]) -> ModelRc<BookItem> {
     ModelRc::new(VecModel::from(items))
 }
 
+/// 目录模型：`index` 必须是服务端目录里的原始下标（`getBookContent` 用它取正文），
+/// 所以过滤空标题时不能重新编号。
 pub fn chapters_model(chapters: &[crate::api::Chapter]) -> ModelRc<ChapterItem> {
     let items: Vec<ChapterItem> = chapters
         .iter()
         .enumerate()
+        .filter(|(_, c)| !c.title.is_empty())
         .map(|(i, c)| ChapterItem {
             title: c.title.clone().into(),
             index: i as i32,

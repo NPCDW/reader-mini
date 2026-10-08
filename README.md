@@ -23,6 +23,8 @@
 
 ## 接口
 
+详细请查看 [README-api.md](./README-api.md)
+
 | 接口 | 方法 | 说明 |
 | --- | --- | --- |
 | `/getBookshelf` | GET | 获取所有图书 |
