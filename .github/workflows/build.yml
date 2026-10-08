@@ -12,53 +12,63 @@ permissions:
 
 jobs:
   binaries:
-    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
-          # - build: linux-amd64
-          #   os: ubuntu-latest
-          #   rust: stable
-          #   target: x86_64-unknown-linux-gnu
-          #   archive-name: reader-mini-${{ github.ref_name }}-linux-amd64.tar.gz
-          # - build: linux-armv8
-          #   os: ubuntu-24.04-arm
-          #   rust: stable
-          #   target: aarch64-unknown-linux-gnu
-          #   archive-name: reader-mini-${{ github.ref_name }}-linux-arm64.tar.gz
-          - build: windows
-            os: windows-latest
-            rust: stable-x86_64-msvc
-            target: x86_64-pc-windows-msvc
-            archive-name: reader-mini-${{ github.ref_name }}-windows-amd64.7z
+          - build: linux-x86
+            platform: ubuntu-latest
+            rust_target: ''
+            tauri_build_args: ''
+          - build: linux-arm
+            platform: ubuntu-24.04-arm
+            rust_target: ''
+            tauri_build_args: ''
+          # - build: macos-arm
+          #   platform: macos-latest # for Arm based macs (M1 and above).
+          #   rust_target: 'aarch64-apple-darwin'
+          #   tauri_build_args: '--target aarch64-apple-darwin'
+          # - build: macos-x86
+          #   platform: macos-latest # for Intel based macs.
+          #   rust_target: 'x86_64-apple-darwin'
+          #   tauri_build_args: '--target x86_64-apple-darwin'
+          - build: windows-x86
+            platform: windows-latest
+            rust_target: ''
+            tauri_build_args: ''
+          # - build: windows-arm
+          #   platform: windows-11-arm
+          #   rust_target: ''
+          #   tauri_build_args: ''
+    runs-on: ${{ matrix.platform }}
     steps:
     - uses: actions/checkout@v6
+    - name: Install Nodejs
+      uses: actions/setup-node@v6
+      with:
+        node-version-file: '.nvmrc'
     - name: Install Rust
       uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
-        toolchain: ${{ matrix.rust }}
-        target: ${{ matrix.target }}
-    - name: Build
-      run: cargo build --verbose --release --target ${{ matrix.target }}
-      env:
-        RUST_BACKTRACE: 1
-    - name: Strip binary (linux and macos)
-      if: matrix.build == 'linux-amd64' || matrix.build == 'linux-armv8'
-      run: strip "target/${{ matrix.target }}/release/reader-mini"
-    - name: Build archive
+        cache: false
+        # Those targets are only used on macos runners so it's in an `if` to slightly speed up windows and linux builds.
+        target: ${{ matrix.rust_target }}
+    - name: Install web dependencies
       shell: bash
+      run: npm install -g pnpm && pnpm i
+    - name: install dependencies (ubuntu only)
+      if: matrix.build == 'linux-x86' || matrix.build == 'linux-arm'
       run: |
-        mkdir archive
-        cp LICENSE README.md archive/
-        cd archive
-        if [ "${{ matrix.build }}" = "windows" ]; then
-          cp "../target/${{ matrix.target }}/release/reader-mini.exe" ./
-          7z a "${{ matrix.archive-name }}" LICENSE README.md reader-mini.exe
-        else
-          cp "../target/${{ matrix.target }}/release/reader-mini" ./
-          tar -czf "${{ matrix.archive-name }}" LICENSE README.md reader-mini
-        fi
-    - name: Release
-      uses: softprops/action-gh-release@v3
+        sudo apt-get update
+        sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+    - name: Build release
+      uses: tauri-apps/tauri-action@v0
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       with:
-        files: archive/${{ matrix.archive-name }}
+        updaterJsonPreferNsis: true
+        tagName: ${{ github.ref_name }}
+        assetNamePattern: "[name]-[version]-[platform]-[arch][ext]"
+        args: ${{ matrix.tauri_build_args }}
