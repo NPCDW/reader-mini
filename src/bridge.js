@@ -32,6 +32,7 @@ export const pollToggle = () => call("poll_toggle");
 export const takePending = () => call("take_pending");
 export const openReader = (args) => call("open_reader", args);
 export const switchChapter = (args) => call("switch_chapter", args);
+export const saveProgress = (args) => call("save_progress", args);
 export const closeReader = (args) => call("close_reader", args);
 export const saveReaderSize = (width, height) =>
   call("save_reader_size", { width, height });

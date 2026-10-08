@@ -26,7 +26,7 @@ const config = ref(null);
 /** 设置保存后递增，让已开着的阅读窗口重新读一遍样式 */
 const styleTick = ref(0);
 /** 阅读窗口最近一次回传的位置，收起 / 退出时用它把进度收干净 */
-const readerState = reactive({ chapterIndex: 0, title: "", line: 0 });
+const readerState = reactive({ chapterIndex: 0, title: "", line: 0, pos: 0 });
 let pollTimer = null;
 let stopTick = null;
 let stopPos = null;
@@ -152,10 +152,14 @@ async function handleToggle(name) {
   // 快捷键收起直接叫窗口自己收（它手上有准确的章节与行号），
   // 退出时窗口可能已经没了，就用手上这份位置兜底
   if (name === "close" || name === "quit") {
+    // 阅读窗口自己收起时会先把进度写完、再叫后端藏窗口，到这里通常已经收干净了；
+    // 这一次是兜底：窗口可能已经没了（退出前先被带走），手上这份位置就是唯一线索
     await call("close_reader", {
       chapterIndex: readerState.chapterIndex,
       chapterTitle: readerState.title,
       line: readerState.line,
+      pos: readerState.pos ?? 0,
+      hide: true,
     }).catch(() => {});
   }
   if (name === "quit") await call("quit_app").catch(() => {});

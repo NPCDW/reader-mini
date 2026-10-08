@@ -6,6 +6,7 @@ import {
   getConfig,
   on,
   send,
+  saveProgress,
   saveReaderSize,
   switchChapter,
   takePending,
@@ -27,6 +28,10 @@ const TOP_GAP = 6;
 const MAX_ROWS_PER_CHAPTER = 2000;
 /** 收起时全局快捷键可能还在按住，这段时间里不接受失焦自动收起 */
 const CLOSE_GUARD_MS = 600;
+/** 翻页上报进度的节流：连着翻好几屏也只报最后停住的那一屏 */
+const SAVE_THROTTLE_MS = 800;
+/** 窗口刚打开 / 刚换章时报一次，稍等一下 —— 免得「呼出来」被当成「读到这儿」 */
+const SHOW_DELAY_MS = 1200;
 
 const bg = ref("#181818");
 const fg = ref("#bdbdbd");
@@ -36,6 +41,10 @@ const lineHeightFactor = ref(1.5);
 const title = ref("");
 const text = ref("");
 const chapterIndex = ref(0);
+/** 当前这本书在书架里的下标，上报进度要用；-1 表示没书 */
+const bookIndex = ref(-1);
+/** 上次读到的正文位置。同一章里翻页不动它，换章时归零（从头读起） */
+const durChapterPos = ref(0);
 /** 手上这份内容对应的样式版本，用来判断「配置是不是比正文新」 */
 const styleTick = ref(0);
 /** 往回翻章时后端给 usize::MAX，表示落在本章末尾 */
@@ -242,6 +251,9 @@ function gotoPage(index) {
   pageIndex.value = Math.min(Math.max(index, 0), pages.value - 1);
   applyPage();
   reportPosition();
+  // 翻页就是读者的进度：停下这一屏就把它报给服务端。节流在前头，
+  // 连着翻十屏只会发最后那一屏；真要能精确定位，靠的是收起时的收尾调用
+  if (ready) scheduleSave(SAVE_THROTTLE_MS);
 }
 
 /**
@@ -273,16 +285,55 @@ const currentLine = computed(() => {
  */
 function reportPosition() {
   send("reader://position", {
+    bookIndex: bookIndex.value,
     chapterIndex: chapterIndex.value,
     title: title.value,
     line: currentLine.value,
+    pos: durChapterPos.value,
   }).catch(() => {});
+}
+
+/** 手上这本书读到哪了；还没拿到书（窗口刚起来）就不上报 */
+function progressArgs() {
+  if (bookIndex.value < 0 || !text.value) return null;
+  return {
+    bookIndex: bookIndex.value,
+    chapterIndex: chapterIndex.value,
+    chapterTitle: title.value,
+    line: currentLine.value,
+    pos: durChapterPos.value,
+  };
+}
+
+let saveTimer = null;
+/** 装载完成之前别上报：那时行号还是空的，报上去就是把进度抹了 */
+let ready = false;
+
+/** 攒一下再报：翻页是连续动作，报得太勤就是给服务端刷无效请求 */
+function scheduleSave(delay = SAVE_THROTTLE_MS) {
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    saveProgressNow();
+  }, delay);
+}
+
+function saveProgressNow() {
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  const args = progressArgs();
+  if (!args) return Promise.resolve();
+  return saveProgress(args).catch((e) => console.warn(`保存进度失败: ${e}`));
 }
 
 async function load(payload) {
   if (!payload) return;
+  bookIndex.value = payload.bookIndex ?? -1;
   chapterIndex.value = payload.chapterIndex ?? 0;
   title.value = payload.chapterTitle || "";
+  durChapterPos.value = payload.durChapterPos ?? 0;
   const keepPage = pageIndex.value;
   const sameText = styleTick.value > 0 && payload.styleTick === styleTick.value;
   text.value = payload.text || "";
@@ -301,6 +352,10 @@ async function load(payload) {
   }
   rebuild();
   gotoPage(pendingLastPage.value ? pages.value - 1 : 0);
+  // 窗口刚打开 / 刚换章：读者停在这一屏就算进度。延迟一点报，
+  // 免得刚弹出还没看就被记成「读到这儿」—— 真读起来后的那次翻页会把它盖掉
+  ready = true;
+  scheduleSave(SHOW_DELAY_MS);
 }
 
 /** PgUp / PgDn：本章内翻一屏，翻到本章头尾就换到相邻一章 */
@@ -347,15 +402,29 @@ async function close() {
   return closing;
 }
 
-/** 真正收起：成功返回 true */
+/**
+ * 真正收起：成功返回 true。
+ *
+ * 收起前先把手上这屏的进度同步过去（`hide: false`）—— 翻页上报是节流的，
+ * 读者可能刚翻两屏就按 Esc，最后那两屏还在攒着没发。等服务端收下了再叫它把窗口藏了
+ * （`hide: true`）：反过来的话「藏」是同步的、写进度是异步的，可能还没写完就被托盘退出带走。
+ * 正在拖窗口时不上报也不收：拖拽过程中要经过失焦。
+ */
 async function doClose() {
   if (interacting()) return false;
+  const args = progressArgs();
+  const payload = {
+    chapterIndex: args?.chapterIndex ?? chapterIndex.value,
+    chapterTitle: args?.chapterTitle ?? title.value,
+    line: args?.line ?? currentLine.value,
+    pos: durChapterPos.value,
+  };
   try {
-    await closeReader({
-      chapterIndex: chapterIndex.value,
-      chapterTitle: title.value,
-      line: currentLine.value,
-    });
+    // 先去重掉还在攒着的那次翻页上报（这一下会一起写掉），再同步 + 收起
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = null;
+    await closeReader({ ...payload, hide: false });
+    await closeReader({ ...payload, hide: true });
     return true;
   } catch (e) {
     console.warn(String(e));
@@ -512,6 +581,7 @@ onUnmounted(() => {
   window.removeEventListener("blur", blurClose);
   window.removeEventListener("mouseup", onDragEnd);
   if (resizeTimer) clearTimeout(resizeTimer);
+  if (saveTimer) clearTimeout(saveTimer);
 });
 
 // 字号与行高倍数直接决定行高与整章行数，变了必须重排；颜色只走 CSS 变量，不用动排版
