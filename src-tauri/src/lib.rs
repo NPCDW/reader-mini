@@ -42,9 +42,11 @@ pub struct State {
     /// 当前在读的书在书架里的下标，-1 表示还没选过
     pub current_book: Mutex<i64>,
     /// 最近一次要展示的正文。阅读窗口是异步起来的，事件可能在它开始监听前就发完了，
-    /// 所以内容同时留在这里：窗口起来时自己取走一份，设置页保存样式后
-    /// 后端也拿它再交一次手（所以是「留着」而不是「取走就清」）。
+    /// 所以内容同时留在这里，窗口上报「已就绪」时自己取走。
     pending: Mutex<Option<api::ReadPayload>>,
+    /// 样式版本。设置页每保存一次就加一，阅读窗口据此知道该重新读配置了；
+    /// 窗口起来得晚时也靠它判断「手上这份内容」是不是当前样式的
+    style_tick: Mutex<u64>,
     toggles: Mutex<Vec<Toggle>>,
     app: Mutex<Option<AppHandle>>,
 }
@@ -64,11 +66,19 @@ impl State {
         *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(payload);
     }
 
-    fn pending(&self) -> Option<api::ReadPayload> {
+    fn style_tick(&self) -> u64 {
+        *self.style_tick.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn set_style_tick(&self, tick: u64) {
+        *self.style_tick.lock().unwrap_or_else(|e| e.into_inner()) = tick;
+    }
+
+    fn take_pending(&self) -> Option<api::ReadPayload> {
         self.pending
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clone()
+            .take()
     }
 
     fn take_toggle(&self) -> Option<&'static str> {
@@ -95,7 +105,7 @@ fn poll_toggle(state: tauri::State<'_, Arc<State>>) -> Option<String> {
 /// 不用「建窗口后 emit」：事件可能在页面开始监听之前就发完了，正文会丢。
 #[tauri::command]
 fn take_pending(state: tauri::State<'_, Arc<State>>) -> Option<api::ReadPayload> {
-    state.pending()
+    state.take_pending()
 }
 
 /// 真正退出程序（托盘菜单的「退出」）。
@@ -212,7 +222,9 @@ async fn open_reader(
     chapter_index: i64,
     chapter_title: String,
     start_line: usize,
+    style_tick: u64,
 ) -> Result<bool, String> {
+    state.set_style_tick(style_tick);
     // 全局快捷键按第二下：窗口开着就收起，进度照常写回
     if let Some(win) = app.get_webview_window("reader") {
         if win.is_visible().unwrap_or(false) {
@@ -240,6 +252,7 @@ async fn open_reader(
 async fn refresh_reader_style(
     app: AppHandle,
     state: tauri::State<'_, Arc<State>>,
+    style_tick: u64,
 ) -> Result<(), String> {
     let Some(win) = app.get_webview_window("reader") else {
         return Ok(());
@@ -247,15 +260,22 @@ async fn refresh_reader_style(
     if !win.is_visible().unwrap_or(false) {
         return Ok(());
     }
-    // 手上还留着正文就原样再交一次手，阅读窗口收到会重新读配置并原地重排；
+    state.set_style_tick(style_tick);
+    // 手上还留着正文就原样再交一次手，阅读窗口收到会重新读配置；
     // 没有正文（比如刚启动还没读过）就只发个通知
-    match state.pending() {
+    match pending_payload(&state) {
         Some(payload) => {
+            let payload = api::ReadPayload {
+                style_tick,
+                ..payload
+            };
+            state.set_pending(payload.clone());
             win.emit("reader://load", &payload)
                 .map_err(|e| e.to_string())?;
         }
         None => {
-            win.emit("reader://style", ()).map_err(|e| e.to_string())?;
+            win.emit("reader://style", style_tick)
+                .map_err(|e| e.to_string())?;
         }
     }
     Ok(())
@@ -312,6 +332,15 @@ async fn switch_chapter(
     Ok(())
 }
 
+/// 阅读窗口当前该显示的那份内容（后端留着的那一份）
+fn pending_payload(state: &Arc<State>) -> Option<api::ReadPayload> {
+    state
+        .pending
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
 async fn load_chapter(
     state: &Arc<State>,
     book_index: usize,
@@ -333,17 +362,9 @@ async fn load_chapter(
         chapter_index,
         chapter_title,
         start_line,
+        style_tick: 0,
         text,
     })
-}
-
-/// 按配置里的尺寸摆好阅读窗口（在它显示之前调用）
-fn set_reader_size(win: &tauri::WebviewWindow, cfg: &Config) -> Result<(), String> {
-    win.set_size(tauri::LogicalSize::new(
-        cfg.reader_width as f64,
-        cfg.reader_height as f64,
-    ))
-    .map_err(|e| e.to_string())
 }
 
 /// 把一份内容交给阅读窗口：已开着就原地刷新，没有才新建。
@@ -353,6 +374,10 @@ fn present(
     cfg: &Config,
     payload: api::ReadPayload,
 ) -> Result<bool, String> {
+    let payload = api::ReadPayload {
+        style_tick: state.style_tick(),
+        ..payload
+    };
     state.set_pending(payload.clone());
     match app.get_webview_window("reader") {
         Some(win) => {
@@ -375,9 +400,6 @@ fn present(
                     .visible(false)
                     .build()
                     .map_err(|e| e.to_string())?;
-            // 尺寸在窗口显示之前先定死，再 show —— 让 show 去套用 inner_size 的话，
-            // 页面会先按上一个尺寸排一遍，分页也就跟着错一屏
-            let _ = set_reader_size(&win, cfg);
             win.emit("reader://load", &payload)
                 .map_err(|e| e.to_string())?;
             win.show().map_err(|e| e.to_string())?;
@@ -455,6 +477,7 @@ pub fn run() {
         books: Mutex::new(Vec::new()),
         current_book: Mutex::new(-1),
         pending: Mutex::new(None),
+        style_tick: Mutex::new(0),
         toggles: Mutex::new(Vec::new()),
         app: Mutex::new(None),
     });
