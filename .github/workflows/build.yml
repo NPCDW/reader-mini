@@ -16,16 +16,16 @@ jobs:
     strategy:
       matrix:
         include:
-          - build: linux-amd64
-            os: ubuntu-latest
-            rust: stable
-            target: x86_64-unknown-linux-gnu
-            archive-name: reader-mini-${{ github.ref_name }}-linux-amd64.tar.gz
-          - build: linux-armv8
-            os: ubuntu-24.04-arm
-            rust: stable
-            target: aarch64-unknown-linux-gnu
-            archive-name: reader-mini-${{ github.ref_name }}-linux-arm64.tar.gz
+          # - build: linux-amd64
+          #   os: ubuntu-latest
+          #   rust: stable
+          #   target: x86_64-unknown-linux-gnu
+          #   archive-name: reader-mini-${{ github.ref_name }}-linux-amd64.tar.gz
+          # - build: linux-armv8
+          #   os: ubuntu-24.04-arm
+          #   rust: stable
+          #   target: aarch64-unknown-linux-gnu
+          #   archive-name: reader-mini-${{ github.ref_name }}-linux-arm64.tar.gz
           - build: windows
             os: windows-latest
             rust: stable-x86_64-msvc
