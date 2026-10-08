@@ -1,0 +1,3 @@
+# esbuild 安装时要落地平台二进制，vite build 依赖它
+allowBuilds:
+  esbuild: true

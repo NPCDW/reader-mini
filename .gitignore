@@ -1,3 +1,15 @@
+# Rust
 /target
+/src-tauri/target
+
+# 前端
+node_modules
+dist
+
+# 杂项（截图与临时产物），但应用图标要进仓库
 *.png
+!src-tauri/icons/*.png
 .Trash-0
+
+# Tauri 生成的 ACL schema
+/src-tauri/gen/schemas

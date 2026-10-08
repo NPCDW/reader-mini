@@ -1,0 +1,16 @@
+html,
+body,
+#reader {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.reader-body {
+  /* 背景色由配置在运行时写到 :root 上，这里的两个默认值与 Config::default() 一致 */
+  background: var(--read-bg, #181818);
+  color: var(--read-fg, #bdbdbd);
+  font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+  -webkit-user-select: none;
+  user-select: none;
+}
