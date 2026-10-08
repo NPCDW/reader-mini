@@ -9,6 +9,7 @@ use std::sync::Mutex;
 pub struct Record {
     pub chapter_index: i64,
     pub chapter_title: String,
+    /// 停在正文的第几个逻辑行（旧版本这里存的是页码）
     pub page: usize,
 }
 

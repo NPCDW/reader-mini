@@ -30,13 +30,15 @@ export component AppWindow inherits Window {
     in-out property <string> read-fg: "#333333";
     in-out property <int> read-font-size: 20;
     in-out property <string> font-size-text: "20";
-    in property <string> hotkey: "Ctrl+Alt+R";
+    in-out property <string> line-height-text: "1.5";
+    in-out property <string> hotkey: "Ctrl+Alt+R";
+    in-out property <string> hotkey-input: "Ctrl+Alt+R";
     in-out property <string> status: "";
     in property <bool> loading: false;
 
     callback open-book(int);
     callback open-toc(int);
-    callback save-settings(string, string, string, int);
+    callback save-settings(string, string, string, int, string, float);
     callback refresh();
 
     VerticalLayout {
@@ -189,12 +191,68 @@ export component AppWindow inherits Window {
                         edited => { root.read-font-size = self.text.to-float(); }
                     }
                 }
-                Text { text: "阅读窗口快捷键：" + root.hotkey + "（全局，重启后生效）"; font-size: 13px; color: #777; width: 100%; }
+                Text {
+                    text: "行高倍数（相对字号，默认 1.5）";
+                    font-size: 14px;
+                    color: #333;
+                    width: 100%;
+                }
+                TextInput {
+                    text <=> root.line-height-text;
+                    height: 36px;
+                    font-size: 14px;
+                    width: 100%;
+                }
+                Text {
+                    text: "全局快捷键（呼出 / 关闭阅读窗口，保存后立即生效）";
+                    font-size: 14px;
+                    color: #333;
+                    width: 100%;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    TextInput {
+                        text <=> root.hotkey-input;
+                        // Slint 无 placeholder，用空值兜底提示（见下方说明文字）
+                        height: 36px;
+                        font-size: 14px;
+                        horizontal-stretch: 1;
+                    }
+                    Rectangle {
+                        width: 96px;
+                        height: 36px;
+                        background: #e3e6ea;
+                        border-radius: 6px;
+                        Text {
+                            text: "恢复默认";
+                            color: #333;
+                            font-size: 13px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        TouchArea { clicked => { root.hotkey-input = "Ctrl+Alt+R"; } }
+                    }
+                }
+                Text {
+                    text: "当前生效：" + root.hotkey;
+                    font-size: 12px;
+                    color: #999;
+                    width: 100%;
+                }
                 Button {
                     text: "保存设置";
                     width: 140px;
                     height: 36px;
-                    clicked => { root.save-settings(root.base-url, root.read-bg, root.read-fg, root.read-font-size); }
+                    clicked => {
+                        root.save-settings(
+                            root.base-url,
+                            root.read-bg,
+                            root.read-fg,
+                            root.read-font-size,
+                            root.hotkey-input,
+                            root.line-height-text.to-float(),
+                        );
+                    }
                 }
                 Text { text: root.status; color: #4a6fa5; font-size: 13px; width: 100%; }
             }

@@ -8,6 +8,8 @@ pub struct Config {
     pub read_bg: String,
     pub read_fg: String,
     pub read_font_size: i32,
+    /// 正文行高倍数（相对字号）
+    pub read_line_height: f32,
     pub hotkey: String,
     pub reader_width: f32,
     pub reader_height: f32,
@@ -20,6 +22,7 @@ impl Default for Config {
             read_bg: "#f5f0e1".into(),
             read_fg: "#333333".into(),
             read_font_size: 20,
+            read_line_height: 1.5,
             hotkey: "Ctrl+Alt+R".into(),
             reader_width: 460.0,
             reader_height: 560.0,

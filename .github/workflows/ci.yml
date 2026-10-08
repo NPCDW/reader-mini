@@ -20,7 +20,8 @@ jobs:
             build-essential pkg-config cmake \
             libfontconfig1-dev libfreetype6-dev \
             libxkbcommon-dev libxkbcommon-x11-dev libx11-dev libxcb1-dev \
-            libgl1-mesa-dev libegl1-mesa-dev libssl-dev
+            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xkb1 \
+            libgl1-mesa-dev libegl1-mesa-dev
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable

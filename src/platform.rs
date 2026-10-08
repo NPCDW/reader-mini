@@ -186,7 +186,7 @@ mod linux {
 mod windows {
     use windows_sys::Win32::Foundation::POINT;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetCursorPos, GetForegroundWindow, GetKeyState, SetWindowPos, SWP_NOSIZE, SWP_NOZORDER,
+        GetCursorPos, GetForegroundWindow, GetKeyState, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
     };
 
     pub fn is_focused(hwnd: isize) -> bool {

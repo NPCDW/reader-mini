@@ -1,4 +1,6 @@
+// 阅读窗口：全文一次性渲染，不切页；左侧滚动条看进度，
 import { ScrollView } from "std-widgets.slint";
+// PgUp / PgDn 按“可视行”滚动，滚动后至少保留一行重叠（下一页首行 == 上一页末行）。
 
 export component ReaderWindow inherits Window {
     title: "reader-mini-reader";
@@ -10,18 +12,49 @@ export component ReaderWindow inherits Window {
     in-out property <brush> bg: #f5f0e1;
     in-out property <brush> fg: #333333;
     in property <length> font-size: 20px;
-    in property <string> page-text: "";
+    // 行高倍数（相对字号），换算可视行数用
+    in property <float> line-height-factor: 1.5;
+    // 当前正文在滚动视口里的偏移：向下滚动时为负值（Slint content-y 语义）
+    in-out property <length> scroll-offset: 0px;
+    // 正文可视区高度。Slint 的 Window 没暴露尺寸变化回调，这里让
+    // ScrollView 自己把 visible-height 写回来（只读，避免自绑定死循环）。
+    out property <length> body-height: 0px;
+    in property <string> full-text: "";
     in property <string> page-info: "";
     in property <string> title-text: "";
 
-    callback next-page();
-    callback prev-page();
+    callback scroll-page(int);
     callback closed();
     callback drag-start();
     callback dragging();
     callback drag-end();
 
     background: bg;
+
+    // 键盘：PgUp / PgDn 按行翻屏；Esc 关闭。
+    // 铺满整窗并 focus-on-click：点窗口任意处即可拿键盘焦点。
+    keys-area := FocusScope {
+        width: 100%;
+        height: 100%;
+        focus-on-click: true;
+        enabled: true;
+
+        key-pressed(event) => {
+            if (event.text == Key.PageDown) {
+                root.scroll-page(1);
+                return accept;
+            }
+            if (event.text == Key.PageUp) {
+                root.scroll-page(-1);
+                return accept;
+            }
+            if (event.text == Key.Escape) {
+                root.closed();
+                return accept;
+            }
+            reject
+        }
+    }
 
     VerticalLayout {
         Rectangle {
@@ -61,7 +94,12 @@ export component ReaderWindow inherits Window {
             }
         }
 
-        ScrollView {
+        // 正文区：ScrollView 自带滚动条，content-y 直连 scroll-offset，
+        // Rust 侧改这个值就能精确定位到行。
+        body := ScrollView {
+            content-y <=> root.scroll-offset;
+            // 可视高度由 Rust 直接按窗口尺寸推算，这里只把实际值回传用于显示
+            init => { root.body-height = self.visible-height; }
             VerticalLayout {
                 padding-left: 18px;
                 padding-right: 18px;
@@ -69,15 +107,18 @@ export component ReaderWindow inherits Window {
                 padding-bottom: 6px;
                 alignment: start;
                 Text {
-                    text: root.page-text;
+                    text: root.full-text;
                     color: root.fg;
                     font-size: root.font-size;
                     wrap: word-wrap;
                     width: 100%;
+                    line-height-factor: root.line-height-factor;
                 }
             }
         }
 
+        // 底部：PgUp / PgDn 按行翻动，不能直接改 scroll-offset（ScrollView 内部会重算），
+        // 所以这里只把信号丢给 Rust，由 Rust 按行坐标定位。
         Rectangle {
             height: 24px;
             background: transparent;
@@ -92,7 +133,7 @@ export component ReaderWindow inherits Window {
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
-                    TouchArea { clicked => { root.prev-page(); } }
+                    TouchArea { clicked => { root.scroll-page(-1); } }
                 }
                 Rectangle {
                     width: 60px;
@@ -104,7 +145,7 @@ export component ReaderWindow inherits Window {
                         horizontal-alignment: center;
                         vertical-alignment: center;
                     }
-                    TouchArea { clicked => { root.next-page(); } }
+                    TouchArea { clicked => { root.scroll-page(1); } }
                 }
                 Rectangle { horizontal-stretch: 1; }
                 Text {

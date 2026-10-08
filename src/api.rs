@@ -60,6 +60,38 @@ struct ProgressBody<'a> {
     dur_chapter_title: &'a str,
 }
 
+/// 请求参数编码。手写百分号编码，避免依赖 reqwest 的 `query` feature。
+pub fn encode_query(params: &[(&str, &str)]) -> String {
+    let mut out = String::new();
+    for (k, v) in params {
+        if !out.is_empty() {
+            out.push('&');
+        }
+        out.push_str(&percent_encode(k));
+        out.push('=');
+        out.push_str(&percent_encode(v));
+    }
+    out
+}
+
+fn percent_encode(s: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(*b as char)
+            }
+            _ => {
+                out.push('%');
+                out.push(HEX[(b >> 4) as usize] as char);
+                out.push(HEX[(b & 0x0f) as usize] as char);
+            }
+        }
+    }
+    out
+}
+
 fn join(base: &str, path: &str) -> String {
     format!(
         "{}/{}",
@@ -100,8 +132,10 @@ pub async fn get_chapter_list(
     book_url: &str,
 ) -> anyhow::Result<Vec<Chapter>> {
     let text = client
-        .get(join(base, "getChapterList"))
-        .query(&[("url", book_url)])
+        .get(join(
+            base,
+            &format!("getChapterList?{}", encode_query(&[("url", book_url)])),
+        ))
         .send()
         .await?
         .text()
@@ -119,8 +153,13 @@ pub async fn get_book_content(
     index: i64,
 ) -> anyhow::Result<String> {
     let text = client
-        .get(join(base, "getBookContent"))
-        .query(&[("url", book_url), ("index", &index.to_string())])
+        .get(join(
+            base,
+            &format!(
+                "getBookContent?{}",
+                encode_query(&[("url", book_url), ("index", &index.to_string())])
+            ),
+        ))
         .send()
         .await?
         .text()

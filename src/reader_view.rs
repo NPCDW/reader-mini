@@ -5,7 +5,8 @@ use crate::reader_win::ReaderWindow;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-const PAGE_CHARS: usize = 380;
+/// 每行最多显示的字数。窗口定宽，按字号估算列数，用于「光标行 -> 断行行号」换算。
+pub const LINE_CHARS_PER_ROW: f32 = 19.0;
 
 /// 关闭阅读窗口时的额外钩子：(book_index, chapter_index, chapter_title)
 pub type CloseHook = dyn Fn(usize, i64, String);
@@ -24,9 +25,14 @@ pub struct ReaderState {
     pub book_index: usize,
     pub chapter_index: i64,
     pub chapter_title: String,
+    /// 正文全文（不再分页）
     pub text: String,
-    pub pages: Vec<String>,
-    pub page: usize,
+    /// 正文按显示宽度折行后的行号 -> 各行的字符偏移
+    pub row_offsets: Vec<usize>,
+    /// 当前停在正文内容的第几个逻辑行（0 基），用于记住进度
+    pub card_line: usize,
+    /// 当前行在视口顶部的偏移（ScrollView content-y 语义，向下滚动为负）
+    pub scroll_y: f32,
     /// 拖动时记录：按下时的鼠标坐标与窗口坐标
     pub drag_origin: Option<((f32, f32), (f32, f32))>,
 }
@@ -37,10 +43,84 @@ pub struct ShowRequest {
     pub chapter_index: i64,
     pub chapter_title: String,
     pub text: String,
-    pub start_page: usize,
+    pub start_line: usize,
 }
 
-/// 打开阅读窗口并呈现指定章节正文。
+/// 生成「折行后的行号 -> 原文里的字符偏移」映射，末尾额外补一个总长度做结尾哨兵。
+pub fn build_row_offsets(text: &str, chars_per_row: usize) -> Vec<usize> {
+    let per_row = chars_per_row.max(1);
+    // 每个字符起始的字节偏移，末尾补总长度做哨兵
+    let starts: Vec<usize> = text
+        .char_indices()
+        .map(|(i, _)| i)
+        .chain(std::iter::once(text.len()))
+        .collect();
+    let mut offsets = vec![0usize];
+    let mut col = 0usize;
+    for (n, (i, ch)) in text.char_indices().enumerate() {
+        if ch == '\n' {
+            offsets.push(i + ch.len_utf8());
+            col = 0;
+            continue;
+        }
+        col += 1;
+        if col >= per_row {
+            // 这个字符之后换到下一显示行
+            offsets.push(starts[n + 1]);
+            col = 0;
+        }
+    }
+    offsets.push(text.len());
+    offsets
+}
+
+/// 给定当前屏的位置，算出按 PgUp / PgDn 之后应该停在哪个逻辑行。
+///
+/// 规则是「上一屏最后一行成为下一屏第一行」：一屏能显示 `rows` 个显示行
+/// （下标 `p..=p+rows-1`），最后一行是 `p + rows - 1`；下一屏就从那一行开始。
+/// 于是每按一次 PgDn，新屏顶部前进 `rows - 1` 个显示行，PgUp 反着来。
+pub fn plan_page_move(
+    card_line: usize,
+    card_offsets: &[usize],
+    row_offsets: &[usize],
+    rows_per_screen: usize,
+    direction: i32,
+) -> usize {
+    let step = rows_per_screen.saturating_sub(1).max(1);
+    let total_rows = row_offsets.len().saturating_sub(1);
+    let anchors: Vec<usize> = card_offsets
+        .iter()
+        .map(|off| {
+            row_offsets
+                .partition_point(|&o| o <= *off)
+                .saturating_sub(1)
+        })
+        .collect();
+    let last = anchors.len().saturating_sub(1);
+
+    // 当前逻辑行在折行行号里的位置；末屏顶部被夹在 total_row - 1 之内，
+    // 保证最后一行仍落在可视区内。
+    let start = anchors.get(card_line).copied().unwrap_or(0);
+    let max_top = total_rows.saturating_sub(1);
+    let target = if direction >= 0 {
+        start.saturating_add(step).min(max_top)
+    } else {
+        start.saturating_sub(step)
+    };
+
+    // 落到哪个逻辑行：取锚点行号不超过 target 的最后一行
+    let mut line = 0usize;
+    for (i, &a) in anchors.iter().enumerate() {
+        if a <= target {
+            line = i;
+        } else {
+            break;
+        }
+    }
+    line.min(last)
+}
+
+/// 打开阅读窗口并呈现整章正文。
 pub fn show_reader(
     app: &AppWindow,
     state: &Rc<std::cell::RefCell<ReaderState>>,
@@ -52,57 +132,121 @@ pub fn show_reader(
         chapter_index,
         chapter_title,
         text,
-        start_page,
+        start_line,
     } = req;
     let reader = ReaderWindow::new()?;
 
-    reader.set_bg(parse_color(&cfg.read_bg));
-    reader.set_fg(parse_color(&cfg.read_fg));
-    reader.set_font_size((cfg.read_font_size as f32) * 1.0);
-    reader.window().set_size(slint::PhysicalSize::new(
-        cfg.reader_width as u32,
-        cfg.reader_height as u32,
-    ));
-    reader.set_title_text(chapter_title.clone().into());
-
-    let pages = crate::api::paginate(&text, PAGE_CHARS);
-    let start = start_page.min(pages.len().saturating_sub(1));
+    let rows = build_row_offsets(&text, line_chars_per_row(cfg.read_font_size) as usize);
     {
         let mut s = state.borrow_mut();
         s.visible = true;
         s.book_index = book_index;
         s.chapter_index = chapter_index;
-        s.chapter_title = chapter_title;
+        s.chapter_title = chapter_title.clone();
+        s.row_offsets = rows;
         s.text = text;
-        s.pages = pages;
-        s.page = start;
+        s.card_line = start_line;
+        s.scroll_y = 0.0;
     }
 
-    render_page(&reader, state);
+    apply_style(&reader, cfg);
+    reader.set_title_text(chapter_title.into());
+    reader.set_full_text(state.borrow().text.clone().into());
+
+    render(&reader, state);
     wire_reader(&reader, app, state);
     Ok(reader)
 }
 
-fn render_page(reader: &ReaderWindow, state: &Rc<std::cell::RefCell<ReaderState>>) {
-    let s = state.borrow();
-    let total = s.pages.len().max(1);
-    let text = s.pages.get(s.page).cloned().unwrap_or_default();
-    reader.set_page_text(text.into());
-    reader.set_page_info(format!("{}/{}", s.page + 1, total).into());
+/// 把配置里的颜色 / 字号应用到阅读窗口
+pub fn apply_style(reader: &ReaderWindow, cfg: &crate::config::Config) {
+    reader.set_bg(parse_color(&cfg.read_bg));
+    reader.set_fg(parse_color(&cfg.read_fg));
+    reader.set_font_size(cfg.read_font_size as f32);
+    reader.set_line_height_factor(cfg.read_line_height);
 }
 
-fn step(reader: &ReaderWindow, state: &Rc<std::cell::RefCell<ReaderState>>, next: bool) {
-    {
-        let mut s = state.borrow_mut();
-        if next {
-            if s.page + 1 < s.pages.len() {
-                s.page += 1;
-            }
-        } else if s.page > 0 {
-            s.page -= 1;
+/// 按字号估算每屏能放几行正文
+fn line_chars_per_row(font_size: i32) -> f32 {
+    (LINE_CHARS_PER_ROW * 20.0 / font_size.max(6) as f32).max(8.0)
+}
+
+/// 一屏可显示的正文行数
+///
+/// 两个输入都能拿到实际值：正文可视高度来自 ScrollView 的 visible-height，
+/// 行高 = 字号 × 行高倍数。首帧还没布局完时 height 可能是 0，按 1 行兜底。
+pub fn rows_per_screen(body_height: f32, font_size: f32, line_height_factor: f32) -> usize {
+    let line_height = (font_size * line_height_factor).max(1.0);
+    ((body_height.max(line_height)) / line_height)
+        .floor()
+        .max(1.0) as usize
+}
+
+fn render(reader: &ReaderWindow, state: &Rc<std::cell::RefCell<ReaderState>>) {
+    let s = state.borrow();
+    let total_rows = s.row_offsets.len().saturating_sub(1).max(1);
+    // 当前逻辑行在折行后的行号
+    let card_offsets = card_line_offsets(&s.text);
+    let row = card_offsets
+        .get(s.card_line)
+        .map(|off| {
+            s.row_offsets
+                .partition_point(|&o| o <= *off)
+                .saturating_sub(1)
+        })
+        .unwrap_or(0);
+    // 距离正文末尾还有几行
+    let remain = total_rows.saturating_sub(row);
+    let pct = if total_rows == 0 {
+        100
+    } else {
+        (((total_rows - remain) as f32 / total_rows as f32) * 100.0).round() as i32
+    };
+    reader.set_page_info(format!("{}% · 第 {} 行", pct.max(0), s.card_line + 1).into());
+}
+
+/// 正文里每个逻辑行的字符偏移（以 `\n` 分段）
+pub fn card_line_offsets(text: &str) -> Vec<usize> {
+    let mut offs = vec![0usize];
+    for (idx, b) in text.bytes().enumerate() {
+        if b == b'\n' {
+            offs.push(idx + 1);
         }
     }
-    render_page(reader, state);
+    offs
+}
+
+fn step(reader: &ReaderWindow, state: &Rc<std::cell::RefCell<ReaderState>>, direction: i32) {
+    let rows = rows_per_screen(
+        reader.get_body_height(),
+        reader.get_font_size(),
+        reader.get_line_height_factor(),
+    );
+    let line_height = (reader.get_font_size() * reader.get_line_height_factor()).max(1.0);
+    {
+        let mut s = state.borrow_mut();
+        let card_offsets = card_line_offsets(&s.text);
+        let row_offsets = s.row_offsets.clone();
+        s.card_line = plan_page_move(
+            s.card_line,
+            &card_offsets,
+            &row_offsets,
+            rows.max(2),
+            direction,
+        );
+        let target_row = card_offsets
+            .get(s.card_line)
+            .map(|off| {
+                row_offsets
+                    .partition_point(|&o| o <= *off)
+                    .saturating_sub(1)
+            })
+            .unwrap_or(0);
+        s.scroll_y = -(target_row as f32 * line_height);
+    }
+    let y = state.borrow().scroll_y;
+    reader.set_scroll_offset(y);
+    render(reader, state);
 }
 
 fn wire_reader(
@@ -110,19 +254,11 @@ fn wire_reader(
     app: &AppWindow,
     state: &Rc<std::cell::RefCell<ReaderState>>,
 ) {
-    let weak_next = reader.as_weak();
+    let weak_scroll = reader.as_weak();
     let st = state.clone();
-    reader.on_next_page(move || {
-        if let Some(r) = weak_next.upgrade() {
-            step(&r, &st, true);
-        }
-    });
-
-    let weak_prev = reader.as_weak();
-    let st = state.clone();
-    reader.on_prev_page(move || {
-        if let Some(r) = weak_prev.upgrade() {
-            step(&r, &st, false);
+    reader.on_scroll_page(move |direction| {
+        if let Some(r) = weak_scroll.upgrade() {
+            step(&r, &st, direction);
         }
     });
 
@@ -138,7 +274,7 @@ fn wire_reader(
                     s.book_index,
                     s.chapter_index,
                     s.chapter_title.clone(),
-                    s.page,
+                    s.card_line,
                 )
             };
             let _ = r.hide();
@@ -155,12 +291,11 @@ fn wire_reader(
     let weak_drag = reader.as_weak();
     let st_drag = state.clone();
     reader.on_drag_start(move || {
-        let _ = weak_drag.upgrade();
-        if let Some((mx, my)) = crate::platform::mouse_pos() {
-            if let Some(r) = weak_drag.upgrade() {
-                let p = r.window().position();
-                st_drag.borrow_mut().drag_origin = Some(((mx, my), (p.x as f32, p.y as f32)));
-            }
+        if let Some((mx, my)) = crate::platform::mouse_pos()
+            && let Some(r) = weak_drag.upgrade()
+        {
+            let p = r.window().position();
+            st_drag.borrow_mut().drag_origin = Some(((mx, my), (p.x as f32, p.y as f32)));
         }
     });
 
@@ -193,7 +328,6 @@ fn wire_reader(
         st_end.borrow_mut().drag_origin = None;
     });
 
-    // 失焦自动关闭：主循环里轮询（见 main.rs），这里提供判断依据
     let _ = app;
 }
 

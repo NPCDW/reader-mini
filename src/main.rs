@@ -1,88 +1,17 @@
 use reader_mini::app::{AppWindow, BookItem, ChapterItem};
 use reader_mini::reader_win::ReaderWindow;
-use reader_mini::{api, config, platform, progress, reader_view};
+use reader_mini::{api, config, hotkey, net, platform, progress, reader_view};
 
 use anyhow::Result;
-use global_hotkey::{
-    hotkey::{Code, HotKey, Modifiers},
-    GlobalHotKeyEvent, GlobalHotKeyManager,
-};
 use slint::{ModelRc, VecModel};
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::mpsc;
 
 use slint::ComponentHandle;
 
-fn parse_hotkey(spec: &str) -> HotKey {
-    let mut mods = Modifiers::empty();
-    let mut code = Code::KeyR;
-    for part in spec.split('+') {
-        match part.trim().to_ascii_lowercase().as_str() {
-            "ctrl" | "control" => mods |= Modifiers::CONTROL,
-            "alt" => mods |= Modifiers::ALT,
-            "shift" => mods |= Modifiers::SHIFT,
-            "super" | "meta" | "win" => mods |= Modifiers::SUPER,
-            other => {
-                if let Some(c) = other.chars().next() {
-                    code = match c {
-                        'a'..='z' => letter_code(c),
-                        '0'..='9' => digit_code(c),
-                        _ => Code::KeyR,
-                    };
-                }
-            }
-        }
-    }
-    HotKey::new(Some(mods), code)
-}
-
-fn letter_code(c: char) -> Code {
-    match c {
-        'a' => Code::KeyA,
-        'b' => Code::KeyB,
-        'c' => Code::KeyC,
-        'd' => Code::KeyD,
-        'e' => Code::KeyE,
-        'f' => Code::KeyF,
-        'g' => Code::KeyG,
-        'h' => Code::KeyH,
-        'i' => Code::KeyI,
-        'j' => Code::KeyJ,
-        'k' => Code::KeyK,
-        'l' => Code::KeyL,
-        'm' => Code::KeyM,
-        'n' => Code::KeyN,
-        'o' => Code::KeyO,
-        'p' => Code::KeyP,
-        'q' => Code::KeyQ,
-        'r' => Code::KeyR,
-        's' => Code::KeyS,
-        't' => Code::KeyT,
-        'u' => Code::KeyU,
-        'v' => Code::KeyV,
-        'w' => Code::KeyW,
-        'x' => Code::KeyX,
-        'y' => Code::KeyY,
-        _ => Code::KeyZ,
-    }
-}
-
-fn digit_code(c: char) -> Code {
-    match c {
-        '0' => Code::Digit0,
-        '1' => Code::Digit1,
-        '2' => Code::Digit2,
-        '3' => Code::Digit3,
-        '4' => Code::Digit4,
-        '5' => Code::Digit5,
-        '6' => Code::Digit6,
-        '7' => Code::Digit7,
-        '8' => Code::Digit8,
-        _ => Code::Digit9,
-    }
-}
-
+/// 快捷键线程 -> 主循环的信号
 enum HotkeyMsg {
     Toggle,
 }
@@ -96,9 +25,7 @@ fn main() -> Result<()> {
     let current_book: Rc<RefCell<i64>> = Rc::new(RefCell::new(-1));
 
     let rt = tokio::runtime::Runtime::new()?;
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()?;
+    let client = net::client()?;
 
     let ui = AppWindow::new()?;
     {
@@ -108,52 +35,63 @@ fn main() -> Result<()> {
         ui.set_read_fg(c.read_fg.clone().into());
         ui.set_read_font_size(c.read_font_size);
         ui.set_hotkey(c.hotkey.clone().into());
+        ui.set_hotkey_input(c.hotkey.clone().into());
+        ui.set_line_height_text(format!("{}", c.read_line_height).into());
     }
     ui.set_books(ModelRc::new(VecModel::from(Vec::<BookItem>::new())));
     ui.set_chapters(ModelRc::new(VecModel::from(Vec::<ChapterItem>::new())));
 
     // 窗口/快捷键 -> 主循环通信
     let (tx, rx) = mpsc::channel::<HotkeyMsg>();
-    let _hotkey_manager = {
-        let spec = cfg.borrow().hotkey.clone();
-        match GlobalHotKeyManager::new() {
-            Ok(m) => {
-                let hk = parse_hotkey(&spec);
-                if let Err(e) = m.register(hk) {
-                    eprintln!("注册全局快捷键 {spec} 失败: {e}");
-                }
-                let tx = tx.clone();
-                std::thread::spawn(move || loop {
-                    if let Ok(ev) = GlobalHotKeyEvent::receiver().recv() {
-                        let _ = tx.send(HotkeyMsg::Toggle);
-                        let _ = ev;
-                    }
-                });
-                Some(m)
-            }
-            Err(e) => {
-                eprintln!("初始化全局快捷键失败: {e}");
-                None
-            }
-        }
-    };
+    let hotkeys = Arc::new(std::sync::Mutex::new({
+        let tx = tx.clone();
+        hotkey::Hotkeys::new(&cfg.borrow().hotkey, move || {
+            let _ = tx.send(HotkeyMsg::Toggle);
+        })
+    }));
 
-    // 设置页保存
+    // 当前阅读窗口（供设置页改样式时热更新）
+    let style_target: Rc<RefCell<slint::Weak<ReaderWindow>>> =
+        Rc::new(RefCell::new(slint::Weak::default()));
+
+    // 设置页保存：顺手把新快捷键注册上，不用重启
     {
         let cfg = cfg.clone();
         let weak = ui.as_weak();
-        ui.on_save_settings(move |base, bg, fg, size| {
+        let hotkeys = hotkeys.clone();
+        let style_target = style_target.clone();
+        ui.on_save_settings(move |base, bg, fg, size, spec, line_height| {
+            let spec = spec.to_string();
             let mut c = cfg.borrow_mut();
             c.base_url = base.to_string();
             c.read_bg = bg.to_string();
             c.read_fg = fg.to_string();
             c.read_font_size = size;
-            let msg = match c.save() {
-                Ok(_) => "已保存".to_string(),
-                Err(e) => format!("保存失败: {e}"),
+            c.read_line_height = line_height;
+            c.hotkey = spec.clone();
+            let saved = c.save();
+            drop(c);
+
+            // 换键：成功才认为设置生效
+            let hotkey_msg = match hotkeys.lock() {
+                Ok(mut h) => match h.apply(&spec) {
+                    Ok(()) => format!("快捷键已生效：{spec}"),
+                    Err(e) => e,
+                },
+                Err(_) => "快捷键管理器不可用".to_string(),
+            };
+            let msg = match saved {
+                Ok(_) => format!("设置已保存；{hotkey_msg}"),
+                Err(e) => format!("配置落盘失败: {e}；{hotkey_msg}"),
             };
             if let Some(app) = weak.upgrade() {
                 app.set_status(msg.into());
+                app.set_hotkey(spec.clone().into());
+            }
+            // 字号 / 颜色改了，已开着的阅读窗口立刻跟着变
+            if let Some(reader) = style_target.borrow().upgrade() {
+                let c = cfg.borrow().clone();
+                reader_view::apply_style(&reader, &c);
             }
         });
     }
@@ -249,6 +187,7 @@ fn main() -> Result<()> {
         let client = client2.clone();
         let rt_handle = rt_handle.clone();
         let active = active.clone();
+        let style_target = style_target.clone();
         Rc::new(
             move |app: &AppWindow, i: usize, chapter_index: i64, title: String| {
                 let bl = book_list.borrow();
@@ -266,8 +205,8 @@ fn main() -> Result<()> {
                     app.set_status("获取正文失败".into());
                     return;
                 };
-                // 恢复上次读到的页
-                let start_page = match progress::recall(i) {
+                // 恢复上次读到的行
+                let start_line = match progress::recall(i) {
                     Some(rec) if rec.chapter_index == chapter_index => rec.page,
                     _ => 0,
                 };
@@ -276,12 +215,13 @@ fn main() -> Result<()> {
                     chapter_index,
                     chapter_title: title,
                     text,
-                    start_page,
+                    start_line,
                 };
                 match reader_view::show_reader(app, &state, &c, req) {
                     Ok(r) => {
                         let _ = r.show();
                         let h = platform::handle_of(r.window());
+                        *style_target.borrow_mut() = r.as_weak();
                         *active.borrow_mut() = Some((r, h));
                     }
                     Err(e) => {

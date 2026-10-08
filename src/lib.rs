@@ -14,6 +14,8 @@ pub mod reader_win {
 
 pub mod api;
 pub mod config;
+pub mod hotkey;
+pub mod net;
 pub mod platform;
 pub mod progress;
 pub mod reader_view;
