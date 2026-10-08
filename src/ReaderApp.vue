@@ -10,15 +10,21 @@ import {
   switchChapter,
   takePending,
 } from "./bridge";
-import { lineHeightOf, measureHeight, pageTops, rowsPerScreen } from "./paging";
+import {
+  clipHeight,
+  lineHeightOf,
+  measureLines,
+  pageEnds,
+  pageFirstRows,
+  rowsPerScreen,
+} from "./paging";
 
-/** 正文上下左右的留白；顶部还要额外让出 BODY_TOP_PAD，分页时必须扣掉 */
+/** 正文左右留白，与 scoped 样式里的 .body padding 是同一个值 */
 const SIDE_PAD = 18;
-const BODY_TOP_PAD = 6;
-/** 末行下面留出的空档，按行高的比例算；见 paging.js 的 rowsPerScreen */
-const ROW_GAP_RATIO = 0.5;
-const HEAD_H = 26;
-const FOOT_H = 24;
+/** 整章最多认多少行；超过就当量坏了，退回估行 */
+const MAX_ROWS_PER_CHAPTER = 2000;
+/** 收起时全局快捷键可能还在按住，这段时间里不接受失焦自动收起 */
+const CLOSE_GUARD_MS = 600;
 
 const bg = ref("#181818");
 const fg = ref("#bdbdbd");
@@ -36,85 +42,194 @@ const pendingLastPage = ref(false);
 /** 是否正在拖动标题条 */
 const dragging = ref(false);
 
+/** 滚动容器，可视高度会被裁到整行高的整数倍 */
 const scrollerEl = ref(null);
-const bodyEl = ref(null);
+/** 页头（标题条）与页脚，用来算正文还剩多少可用高度 */
+const barEl = ref(null);
+const footEl = ref(null);
+/** 正文段落，整章都在里面，高度就是整章的高度 */
+const textEl = ref(null);
+/** 量高度用的探针，不可见 */
 const probeEl = ref(null);
 
 const bodyWidth = ref(0);
+/** 滚动容器能拿到的可视高度（原始值，随时可能变） */
+const rawHeight = ref(0);
+/** 裁到整行高倍数之后的有效视口高度；分页与翻页都以它为准 */
 const bodyHeight = ref(0);
 const lineHeight = ref(0);
-const totalRows = ref(1);
-/** 每屏顶部所在行号，长度即页数 */
+/** 每一行顶边的 y 坐标（相对正文顶部），分页的依据 */
+const offsets = ref([]);
+/** 每屏顶部所在的 y 坐标（正文坐标），长度即页数 */
 const tops = ref([0]);
+/** 每屏首行的行号，长度与 tops 相同 —— 两者是同一条分页表的两种单位 */
+const rowOfPage = ref([0]);
+/** 每屏显示到第几行（下标不含）；最后一屏一路显示到正文末尾 */
+const rowEndOfPage = ref([0]);
 const pageIndex = ref(0);
 
 const pages = computed(() => Math.max(tops.value.length, 1));
 
 const pageInfo = computed(() => {
-  const total = Math.max(totalRows.value, 1);
-  const top = tops.value[pageIndex.value] ?? 0;
-  const bottom = Math.min(
-    top + rowsPerScreen(bodyHeight.value, lineHeight.value, rowGap.value),
-    total,
-  );
-  const pct = Math.round((bottom / total) * 100);
+  const total = Math.max(offsets.value.length, 1);
+  const shown = rowEndOfPage.value[pageIndex.value] ?? 0;
+  const pct = Math.round((shown / total) * 100);
   return `第 ${pageIndex.value + 1}/${pages.value} 页 · ${Math.min(Math.max(pct, 0), 100)}%`;
 });
-
-/** 末行下面留的空档：半个行高，正好挡住下一行的上半截（就是那「半行字」） */
-const rowGap = computed(() => lineHeight.value * ROW_GAP_RATIO);
 
 /** 量不到真实行高时的兜底：自然行高 ≈ 字号 × 1.25 × 行高倍数 */
 const fallbackLineHeight = () =>
   Math.max(fontSize.value * lineHeightFactor.value * 1.25, 1);
 
-/** 正文可视区尺寸跟着窗口走 */
+/**
+ * 正文可视区尺寸：直接问浏览器。
+ *
+ * 量的是**滚动容器**的可视高度，不是正文段落的高度 —— 段落高度是整章的高度，
+ * 拿它当可视区，一屏就把整章都算进去了。也不按页头页脚去减：
+ * 自己减多减少一点，正好就是一行字。
+ *
+ * 量到的是「容器还剩多少高度可用」（页头页脚之间的那块），
+ * 会再被裁到整行高的整数倍（见 `applyViewport`）——
+ * 屏幕上沿那点零头必须消掉，不然它会露出下一行。
+ */
 function syncBodySize() {
   bodyWidth.value = window.innerWidth;
-  bodyHeight.value = Math.max(
-    window.innerHeight - HEAD_H - FOOT_H - BODY_TOP_PAD,
+  // 容器高度已经被我们裁过（`applyViewport` 里设的），所以不能再问它要可用高度：
+  // 那会越裁越小。可用高度 = 窗口高度 − 页头 − 页脚。
+  const available = Math.max(
+    window.innerHeight -
+      (barEl.value?.offsetHeight ?? 0) -
+      (footEl.value?.offsetHeight ?? 0),
     1,
   );
+  if (available !== rawHeight.value) {
+    rawHeight.value = available;
+  }
+  applyViewport();
 }
 
 /**
- * 按当前窗口尺寸与字号重建行高、整章行数与分页表。
+ * 把滚动容器的可视高度裁到整行高的整数倍。
  *
- * 一屏几行 = 正文可视高度 ÷ 实测行高，整章几行 = 实测全文高度 ÷ 实测行高，
- * 所以改字号、换章、拉伸窗口之后都要重算一遍。
- * 重建后尽量停在原来那一屏对应的行上。
+ * 容器原本占满页头页脚之间的空间，那个高度一般不是行高的整数倍，
+ * 多出来的零头正好露出下一行的上半截。裁到整行高的整数倍之后，
+ * 下沿就是某一行的底边，一点字都不会多露。
  */
-function rebuild(keepRow = null) {
-  if (!probeEl.value) return;
-  const anchor = keepRow ?? tops.value[pageIndex.value] ?? 0;
+function applyViewport() {
+  const lh = lineHeight.value > 0 ? lineHeight.value : 0;
+  const clipped = lh > 0 ? clipHeight(rawHeight.value, lh) : rawHeight.value;
+  bodyHeight.value = clipped;
+  if (scrollerEl.value) scrollerEl.value.style.height = `${clipped}px`;
+}
 
-  probeEl.value.style.width = `${Math.max(bodyWidth.value - SIDE_PAD * 2, 80)}px`;
-  probeEl.value.style.fontSize = `${fontSize.value}px`;
-  probeEl.value.style.lineHeight = String(lineHeightFactor.value);
+/**
+ * 按当前窗口尺寸与字号重建行位置与分页表。
+ *
+ * 行位置由浏览器逐段量出来（`measureLines`，量不到就退回按行高估行）：
+ * 「整章总高度 ÷ 行高」反推出来的行数只要多一行，屏幕下沿就会被切成半行字。
+ * 每屏顶部落在量出来的行上，翻页就不会出现半行字。
+ *
+ * `keepY` 是重建后要停住的那个位置（正文 y），不给就停在当前屏顶部。
+ */
+function rebuild(keepY = null) {
+  if (!textEl.value || !scrollerEl.value) return;
+  const anchor = keepY ?? tops.value[pageIndex.value] ?? 0;
 
-  const lh = lineHeightOf(probeEl.value, 10);
+  const lh = probeLineHeight();
   lineHeight.value = lh > 0 ? lh : fallbackLineHeight();
+  applyViewport();
 
-  const h = measureHeight(probeEl.value, text.value);
-  totalRows.value =
-    h > lineHeight.value / 2
-      ? Math.max(Math.round(h / lineHeight.value), 1)
-      : 1;
+  offsets.value = measuredOffsets() ?? estimatedOffsets();
 
-  tops.value = pageTops(
-    totalRows.value,
-    rowsPerScreen(bodyHeight.value, lineHeight.value, rowGap.value),
+  // 同一条分页表的两种单位：行号用来算百分比 / 记进度，y 用来滚到位置。
+  // 位置必须落在实测出来的 y 上 —— 浏览器取整出来的行高会差一两个像素，
+  // 按「行号 × 行高」去滚，翻几屏就会偏出半行。
+  const perPage = rowsPerScreen(bodyHeight.value, lineHeight.value);
+  rowOfPage.value = pageFirstRows(
+    offsets.value.length,
+    perPage,
+    lastReachableRow(),
   );
-  const idx = tops.value.findIndex((t) => t >= anchor);
+  rowEndOfPage.value = pageEnds(offsets.value.length, rowOfPage.value, perPage);
+  tops.value = rowOfPage.value.map(
+    (row) => offsets.value[Math.min(row, offsets.value.length - 1)] ?? 0,
+  );
+  const idx = tops.value.findIndex((t) => t >= anchor - 0.5);
   pageIndex.value = idx < 0 ? tops.value.length - 1 : idx;
   applyPage();
 }
 
-/** 当前屏顶部贴着正文可视区上沿 */
+/**
+ * 滚到底时还能当作屏顶的最下面的行。
+ *
+ * `scrollTop` 到内容末尾就停了，最多滚到「整章高度 − 可视高度」。末屏从更靠下的
+ * 行开始就滚不到位，会被夹回来、末行跌出视口。把这条线换算成行号交给
+ * `pageFirstRows`，让它决定末屏站哪儿。
+ *
+ * 内容装得下整章（`maxScroll <= 0`）时返回 `null`：不分页，也就没有这个限制。
+ */
+function lastReachableRow() {
+  const scroller = scrollerEl.value;
+  const lh = lineHeight.value;
+  if (!scroller || !(lh > 0)) return null;
+  const maxScroll = scroller.scrollHeight - bodyHeight.value;
+  if (!(maxScroll > 0)) return null;
+  return Math.floor(maxScroll / lh);
+}
+
+/** 探针量出的行高（量不到返回 0） */
+function probeLineHeight() {
+  const el = probeEl.value;
+  if (!el) return 0;
+  syncProbe();
+  return lineHeightOf(el, 10);
+}
+
+/**
+ * 量出每行顶边的 y。
+ *
+ * 优先逐段实测（浏览器说这一段占几行），量不出来再退回「整章高度 ÷ 行高」——
+ * 后者的零头会凑出多一行，屏幕下沿就会切出半行字。
+ */
+function measuredOffsets() {
+  const el = probeEl.value;
+  if (!el) return null;
+  syncProbe();
+  return measureLines(el, text.value, lineHeight.value, MAX_ROWS_PER_CHAPTER);
+}
+
+/** 量不到逐行高度时的兜底：按行高铺满整章 */
+function estimatedOffsets() {
+  const lh = Math.max(lineHeight.value, 1);
+  const h = Math.max(textEl.value?.offsetHeight ?? lh, lh);
+  const n = Math.max(Math.round(h / lh), 1);
+  return Array.from({ length: n }, (_, i) => i * lh);
+}
+
+/** 探针调到与正文一模一样的排版：同宽、同字号、同行高 */
+function syncProbe() {
+  const el = probeEl.value;
+  if (!el) return;
+  el.style.width = `${Math.max(bodyWidth.value - SIDE_PAD * 2, 80)}px`;
+  el.style.fontSize = `${fontSize.value}px`;
+  el.style.lineHeight = String(lineHeightFactor.value);
+}
+
+/**
+ * 当前屏顶部贴着正文可视区上沿。
+ *
+ * 位置是正文 y，不是行号 —— 浏览器取整出来的行高会差那么一两个像素，
+ * 按行号 × 行高去滚，滚几屏就会偏出半行。
+ *
+ * 末屏例外：它要显示到正文末尾，得滚到能滚的最下面，否则末尾那几行看不到。
+ * `scrollTop` 会自动夹到上限，这里直接把目标设成内容末尾就好。
+ */
 function applyPage() {
   if (!scrollerEl.value) return;
-  scrollerEl.value.scrollTop =
-    (tops.value[pageIndex.value] ?? 0) * lineHeight.value;
+  const atLast = pageIndex.value >= pages.value - 1;
+  scrollerEl.value.scrollTop = atLast
+    ? scrollerEl.value.scrollHeight
+    : (tops.value[pageIndex.value] ?? 0);
 }
 
 function gotoPage(index) {
@@ -130,7 +245,7 @@ function gotoPage(index) {
  * 这个换算只在记进度时用，差一行不影响续读的体感。
  */
 const currentLine = computed(() => {
-  const topRows = tops.value[pageIndex.value] ?? 0;
+  const topRows = rowOfPage.value[pageIndex.value] ?? 0;
   const perRow = Math.max(
     Math.floor((bodyWidth.value - SIDE_PAD * 2) / Math.max(fontSize.value, 6)),
     8,
@@ -210,26 +325,42 @@ function interacting() {
  * 收起过程中又按了一下，不能两条路径同时去写进度。
  */
 let closing = null;
+/** 刚刚收起过。收起后全局快捷键可能还按着，这段时间里不接受失焦自动收起 */
+let closedAt = 0;
 
 async function close() {
   if (closing) return closing;
-  closing = doClose().finally(() => {
-    closing = null;
-  });
+  closing = doClose()
+    .then((done) => {
+      if (done) closedAt = performance.now();
+      return done;
+    })
+    .finally(() => {
+      closing = null;
+    });
   return closing;
 }
 
+/** 真正收起：成功返回 true */
 async function doClose() {
-  if (interacting()) return;
+  if (interacting()) return false;
   try {
     await closeReader({
       chapterIndex: chapterIndex.value,
       chapterTitle: title.value,
       line: currentLine.value,
     });
+    return true;
   } catch (e) {
     console.warn(String(e));
+    return false;
   }
+}
+
+/** 有些窗口管理器在隐藏窗口之后再补一次失焦；这时不能把它当成读者主动关闭 */
+function blurClose() {
+  if (performance.now() - closedAt < CLOSE_GUARD_MS) return;
+  return close();
 }
 
 async function onKeydown(event) {
@@ -348,14 +479,14 @@ onMounted(async () => {
   // 窗口尺寸变了就按新尺寸重算分页；正文本身高度变化也会触发，rebuild 是幂等的
   observer = new ResizeObserver(() => {
     const prevW = bodyWidth.value;
-    const prevH = bodyHeight.value;
+    const prevH = rawHeight.value;
     syncBodySize();
-    if (prevW === bodyWidth.value && prevH === bodyHeight.value) return;
+    if (prevW === bodyWidth.value && prevH === rawHeight.value) return;
     rebuild();
     schedulePersist();
   });
   observer.observe(document.documentElement);
-  if (bodyEl.value) observer.observe(bodyEl.value);
+  if (textEl.value) observer.observe(textEl.value);
 
   // 先取一次：窗口是异步起来的，后端建窗口时发的那个事件我们可能没赶上
   const initial = await takePending().catch(() => null);
@@ -364,7 +495,7 @@ onMounted(async () => {
   // 配置里也该有真实尺寸，下次打开才不会大小跳一下
   await persistSize();
   window.addEventListener("keydown", onKeydown);
-  window.addEventListener("blur", close);
+  window.addEventListener("blur", blurClose);
   window.addEventListener("mouseup", onDragEnd);
 });
 
@@ -374,7 +505,7 @@ onUnmounted(() => {
   stopStyle?.();
   observer?.disconnect();
   window.removeEventListener("keydown", onKeydown);
-  window.removeEventListener("blur", close);
+  window.removeEventListener("blur", blurClose);
   window.removeEventListener("mouseup", onDragEnd);
   if (resizeTimer) clearTimeout(resizeTimer);
 });
@@ -387,7 +518,12 @@ watch([fontSize, lineHeightFactor], () => {
 
 <template>
   <div class="frame" @mousemove="onDragMove($event)">
-    <header class="bar" @mousedown="onDragStart" @mouseup="onDragEnd">
+    <header
+      ref="barEl"
+      class="bar"
+      @mousedown="onDragStart"
+      @mouseup="onDragEnd"
+    >
       <span class="grip">⠿ {{ title }}</span>
       <button class="close" @click="close">✕</button>
     </header>
@@ -398,10 +534,10 @@ watch([fontSize, lineHeightFactor], () => {
       class="body"
       :style="{ '--fs': `${fontSize}px`, '--lh': lineHeightFactor }"
     >
-      <p ref="bodyEl" class="text">{{ text }}</p>
+      <p ref="textEl" class="text">{{ text }}</p>
     </div>
 
-    <footer class="foot">
+    <footer ref="footEl" class="foot">
       <button @click="step(-1)">PgUp</button>
       <button @click="step(1)">PgDn</button>
       <span class="spacer" />
@@ -454,7 +590,10 @@ watch([fontSize, lineHeightFactor], () => {
 }
 
 .body {
-  flex: 1;
+  /* 高度由脚本按整行高裁出来（applyViewport），这里不参与 flex 分配 ——
+     让 flex 去撑的话，容器会比「整行高的整数倍」高出一截，
+     多出来的那点正好露出下一行的上半截 */
+  flex: 0 0 auto;
   overflow: auto;
   padding: 0 18px;
   scrollbar-width: none;
@@ -466,7 +605,7 @@ watch([fontSize, lineHeightFactor], () => {
 
 .text {
   margin: 0;
-  /* 顶部内边距与 BODY_TOP_PAD 是同一个值 */
+  /* 顶部留一点缝，别让第一行贴着标题条 */
   padding-top: 6px;
   font-size: var(--fs, 20px);
   line-height: var(--lh, 1.5);
@@ -508,6 +647,8 @@ watch([fontSize, lineHeightFactor], () => {
   top: 0;
   left: -99999px;
   margin: 0;
+  /* 与 .text 同一套内边距：探针量出来的高度就是正文真实占的高度 */
+  padding-top: 6px;
   visibility: hidden;
   white-space: pre-wrap;
   word-break: break-word;
