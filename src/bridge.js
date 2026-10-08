@@ -23,7 +23,8 @@ export function on(event, handler) {
 export const getConfig = () => call("get_config");
 export const saveConfig = (config) => call("save_config", { config });
 export const getBookshelf = () => call("get_bookshelf");
-export const getChapterList = (bookUrl) => call("get_chapter_list", { bookUrl });
+export const getChapterList = (bookUrl) =>
+  call("get_chapter_list", { bookUrl });
 export const cacheBooks = (books) => call("cache_books", { books });
 export const setCurrentBook = (index) => call("set_current_book", { index });
 export const resumePoint = (bookIndex) => call("resume_point", { bookIndex });
@@ -34,3 +35,5 @@ export const switchChapter = (args) => call("switch_chapter", args);
 export const closeReader = (args) => call("close_reader", args);
 export const saveReaderSize = (width, height) =>
   call("save_reader_size", { width, height });
+export const refreshReaderStyle = (styleTick) =>
+  call("refresh_reader_style", { styleTick });

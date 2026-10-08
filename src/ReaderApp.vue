@@ -15,17 +15,21 @@ import { lineHeightOf, measureHeight, pageTops, rowsPerScreen } from "./paging";
 /** 正文上下左右的留白；顶部还要额外让出 BODY_TOP_PAD，分页时必须扣掉 */
 const SIDE_PAD = 18;
 const BODY_TOP_PAD = 6;
+/** 末行下面留出的空档，按行高的比例算；见 paging.js 的 rowsPerScreen */
+const ROW_GAP_RATIO = 0.5;
 const HEAD_H = 26;
 const FOOT_H = 24;
 
-const bg = ref("#f5f0e1");
-const fg = ref("#333333");
+const bg = ref("#181818");
+const fg = ref("#bdbdbd");
 const fontSize = ref(20);
 const lineHeightFactor = ref(1.5);
 
 const title = ref("");
 const text = ref("");
 const chapterIndex = ref(0);
+/** 手上这份内容对应的样式版本，用来判断「配置是不是比正文新」 */
+const styleTick = ref(0);
 /** 往回翻章时后端给 usize::MAX，表示落在本章末尾 */
 const pendingLastPage = ref(false);
 
@@ -49,10 +53,16 @@ const pages = computed(() => Math.max(tops.value.length, 1));
 const pageInfo = computed(() => {
   const total = Math.max(totalRows.value, 1);
   const top = tops.value[pageIndex.value] ?? 0;
-  const bottom = Math.min(top + rowsPerScreen(bodyHeight.value, lineHeight.value), total);
+  const bottom = Math.min(
+    top + rowsPerScreen(bodyHeight.value, lineHeight.value, rowGap.value),
+    total,
+  );
   const pct = Math.round((bottom / total) * 100);
   return `第 ${pageIndex.value + 1}/${pages.value} 页 · ${Math.min(Math.max(pct, 0), 100)}%`;
 });
+
+/** 末行下面留的空档：半个行高，正好挡住下一行的上半截（就是那「半行字」） */
+const rowGap = computed(() => lineHeight.value * ROW_GAP_RATIO);
 
 /** 量不到真实行高时的兜底：自然行高 ≈ 字号 × 1.25 × 行高倍数 */
 const fallbackLineHeight = () =>
@@ -87,9 +97,14 @@ function rebuild(keepRow = null) {
 
   const h = measureHeight(probeEl.value, text.value);
   totalRows.value =
-    h > lineHeight.value / 2 ? Math.max(Math.round(h / lineHeight.value), 1) : 1;
+    h > lineHeight.value / 2
+      ? Math.max(Math.round(h / lineHeight.value), 1)
+      : 1;
 
-  tops.value = pageTops(totalRows.value, rowsPerScreen(bodyHeight.value, lineHeight.value));
+  tops.value = pageTops(
+    totalRows.value,
+    rowsPerScreen(bodyHeight.value, lineHeight.value, rowGap.value),
+  );
   const idx = tops.value.findIndex((t) => t >= anchor);
   pageIndex.value = idx < 0 ? tops.value.length - 1 : idx;
   applyPage();
@@ -98,7 +113,8 @@ function rebuild(keepRow = null) {
 /** 当前屏顶部贴着正文可视区上沿 */
 function applyPage() {
   if (!scrollerEl.value) return;
-  scrollerEl.value.scrollTop = (tops.value[pageIndex.value] ?? 0) * lineHeight.value;
+  scrollerEl.value.scrollTop =
+    (tops.value[pageIndex.value] ?? 0) * lineHeight.value;
 }
 
 function gotoPage(index) {
@@ -146,15 +162,29 @@ async function load(payload) {
   if (!payload) return;
   chapterIndex.value = payload.chapterIndex ?? 0;
   title.value = payload.chapterTitle || "";
+  const keepPage = pageIndex.value;
+  const sameText = styleTick.value > 0 && payload.styleTick === styleTick.value;
   text.value = payload.text || "";
+  styleTick.value = payload.styleTick ?? 0;
   pendingLastPage.value = (payload.startLine ?? 0) > 1_000_000;
+
+  // 每次展示都重新读一遍配置：设置页改完样式会重新交一次手，这里就是生效的地方
+  applyStyle(await getConfig().catch(() => ({})));
   await nextTick();
+  if (sameText) {
+    // 只是重刷样式（正文没换）：留在原来那一屏，别把读者踢回页首
+    rebuild();
+    pageIndex.value = Math.min(keepPage, pages.value - 1);
+    applyPage();
+    return;
+  }
   rebuild();
   gotoPage(pendingLastPage.value ? pages.value - 1 : 0);
 }
 
 /** PgUp / PgDn：本章内翻一屏，翻到本章头尾就换到相邻一章 */
 async function step(direction) {
+  if (!text.value) return;
   const atEnd = direction > 0 && pageIndex.value + 1 >= pages.value;
   const atStart = direction < 0 && pageIndex.value === 0;
   if (!atEnd && !atStart) {
@@ -173,8 +203,23 @@ function interacting() {
   return dragging.value;
 }
 
-/** 关窗：进度写回服务端 + 本地记行号，然后把自己藏起来 */
+/**
+ * 收起：让主窗口把进度收干净（写回服务端 + 本地记行号），然后藏起自己。
+ *
+ * 全局快捷键按第二下、托盘「收起」都落到这里，所以加个闸：
+ * 收起过程中又按了一下，不能两条路径同时去写进度。
+ */
+let closing = null;
+
 async function close() {
+  if (closing) return closing;
+  closing = doClose().finally(() => {
+    closing = null;
+  });
+  return closing;
+}
+
+async function doClose() {
   if (interacting()) return;
   try {
     await closeReader({
@@ -188,6 +233,12 @@ async function close() {
 }
 
 async function onKeydown(event) {
+  // 呼出用的全局快捷键在窗口里再按一次就是收起，和托盘「继续阅读 / 收起」同一个语义
+  if (event.key === "PageDown" && event.altKey) {
+    event.preventDefault();
+    await close();
+    return;
+  }
   const handled = {
     PageDown: () => step(1),
     PageUp: () => step(-1),
@@ -212,7 +263,10 @@ let dragOrigin = null;
 async function onDragStart(event) {
   if (event.button !== 0) return;
   const win = getCurrentWindow();
-  const [pos, scale] = await Promise.all([win.outerPosition(), win.scaleFactor()]);
+  const [pos, scale] = await Promise.all([
+    win.outerPosition(),
+    win.scaleFactor(),
+  ]);
   dragOrigin = {
     pointer: { x: event.screenX, y: event.screenY },
     pos: { x: pos.x, y: pos.y },
@@ -263,20 +317,33 @@ async function persistSize() {
   );
 }
 
-async function applyStyle(cfg = {}) {
+function applyStyle(cfg = {}) {
   bg.value = cfg.readBg || bg.value;
   fg.value = cfg.readFg || fg.value;
   fontSize.value = cfg.readFontSize || fontSize.value;
   lineHeightFactor.value = cfg.readLineHeight || lineHeightFactor.value;
-  document.documentElement.style.setProperty("--read-bg", bg.value);
-  document.documentElement.style.setProperty("--read-fg", fg.value);
 }
 
 let stopLoad = null;
+let stopToggle = null;
+let stopStyle = null;
 let observer = null;
 
 onMounted(async () => {
-  await applyStyle(await getConfig().catch(() => ({})));
+  // 先挂监听再取内容：全局快捷键呼出时后端发的 reader://load 就在这一瞬间，
+  // 内容先拿在手上再谈排版，不然初次打开会是一片空白
+  stopLoad = await on("reader://load", (event) => load(event.payload));
+  // 同一个快捷键的第二下是「关闭」：后端发这个事件让窗口自己收干净
+  stopToggle = await on("reader://toggle", () => close());
+  // 手上没有正文时，样式改了只重读配置
+  stopStyle = await on("reader://style", async (event) => {
+    styleTick.value = event.payload ?? styleTick.value;
+    applyStyle(await getConfig().catch(() => ({})));
+    await nextTick();
+    rebuild();
+  });
+
+  applyStyle(await getConfig().catch(() => ({})));
   syncBodySize();
   // 窗口尺寸变了就按新尺寸重算分页；正文本身高度变化也会触发，rebuild 是幂等的
   observer = new ResizeObserver(() => {
@@ -296,7 +363,6 @@ onMounted(async () => {
   // 首次装载也记一次：窗口被系统缩放（HiDPI）或用户从不拉伸时，
   // 配置里也该有真实尺寸，下次打开才不会大小跳一下
   await persistSize();
-  stopLoad = await on("reader://load", (event) => load(event.payload));
   window.addEventListener("keydown", onKeydown);
   window.addEventListener("blur", close);
   window.addEventListener("mouseup", onDragEnd);
@@ -304,6 +370,8 @@ onMounted(async () => {
 
 onUnmounted(() => {
   stopLoad?.();
+  stopToggle?.();
+  stopStyle?.();
   observer?.disconnect();
   window.removeEventListener("keydown", onKeydown);
   window.removeEventListener("blur", close);
@@ -311,7 +379,10 @@ onUnmounted(() => {
   if (resizeTimer) clearTimeout(resizeTimer);
 });
 
-watch([fontSize, lineHeightFactor], () => rebuild());
+// 字号与行高倍数直接决定行高与整章行数，变了必须重排；颜色只走 CSS 变量，不用动排版
+watch([fontSize, lineHeightFactor], () => {
+  nextTick(() => rebuild());
+});
 </script>
 
 <template>
@@ -322,7 +393,11 @@ watch([fontSize, lineHeightFactor], () => rebuild());
     </header>
 
     <!-- 整章正文一次铺满，没有可见滚动条；翻页靠 scrollTop 对到行号 -->
-    <div ref="scrollerEl" class="body" :style="{ '--fs': `${fontSize}px`, '--lh': lineHeightFactor }">
+    <div
+      ref="scrollerEl"
+      class="body"
+      :style="{ '--fs': `${fontSize}px`, '--lh': lineHeightFactor }"
+    >
       <p ref="bodyEl" class="text">{{ text }}</p>
     </div>
 
@@ -335,7 +410,6 @@ watch([fontSize, lineHeightFactor], () => rebuild());
 
     <!-- 量高度用的探针：不可见，只为拿浏览器排版出来的真实高度 -->
     <p ref="probeEl" class="probe" aria-hidden="true" />
-
   </div>
 </template>
 
@@ -346,8 +420,8 @@ watch([fontSize, lineHeightFactor], () => rebuild());
   flex-direction: column;
   height: 100vh;
   overflow: hidden;
-  background: var(--read-bg, #f5f0e1);
-  color: var(--read-fg, #333);
+  background: var(--read-bg, #181818);
+  color: var(--read-fg, #bdbdbd);
 }
 
 .bar {
@@ -438,5 +512,4 @@ watch([fontSize, lineHeightFactor], () => rebuild());
   white-space: pre-wrap;
   word-break: break-word;
 }
-
 </style>

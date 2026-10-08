@@ -28,7 +28,10 @@ use config::Config;
 /// 托盘回调与快捷键回调都在别的线程上，直接碰窗口容易死锁，
 /// 统一塞进队列，由前端轮询。
 pub enum Toggle {
+    /// 呼出 / 继续阅读
     Reader,
+    /// 收起已经开着的阅读窗口
+    Close,
     Quit,
 }
 
@@ -41,6 +44,9 @@ pub struct State {
     /// 最近一次要展示的正文。阅读窗口是异步起来的，事件可能在它开始监听前就发完了，
     /// 所以内容同时留在这里，窗口上报「已就绪」时自己取走。
     pending: Mutex<Option<api::ReadPayload>>,
+    /// 样式版本。设置页每保存一次就加一，阅读窗口据此知道该重新读配置了；
+    /// 窗口起来得晚时也靠它判断「手上这份内容」是不是当前样式的
+    style_tick: Mutex<u64>,
     toggles: Mutex<Vec<Toggle>>,
     app: Mutex<Option<AppHandle>>,
 }
@@ -60,6 +66,14 @@ impl State {
         *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(payload);
     }
 
+    fn style_tick(&self) -> u64 {
+        *self.style_tick.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn set_style_tick(&self, tick: u64) {
+        *self.style_tick.lock().unwrap_or_else(|e| e.into_inner()) = tick;
+    }
+
     fn take_pending(&self) -> Option<api::ReadPayload> {
         self.pending
             .lock()
@@ -72,6 +86,7 @@ impl State {
         let first = guard.first()?;
         let name = match first {
             Toggle::Reader => "reader",
+            Toggle::Close => "close",
             Toggle::Quit => "quit",
         };
         guard.clear();
@@ -195,7 +210,10 @@ fn save_reader_size(state: tauri::State<'_, Arc<State>>, width: f32, height: f32
     let _ = cfg.save();
 }
 
-/// 打开（或原地刷新）阅读窗口。返回 `true` 表示窗口原本就开着。
+/// 打开（或原地刷新）阅读窗口。
+///
+/// 呼出前会先看一眼：窗口已经开着就把这次按键当成「收起」，同步进度后藏起来，
+/// 返回 `false`，前端不再拿内容去刷它。这样呼出 / 关闭就是同一个开关。
 #[tauri::command]
 async fn open_reader(
     app: AppHandle,
@@ -204,7 +222,17 @@ async fn open_reader(
     chapter_index: i64,
     chapter_title: String,
     start_line: usize,
+    style_tick: u64,
 ) -> Result<bool, String> {
+    state.set_style_tick(style_tick);
+    // 全局快捷键按第二下：窗口开着就收起，进度照常写回
+    if let Some(win) = app.get_webview_window("reader") {
+        if win.is_visible().unwrap_or(false) {
+            let _ = win.hide();
+            let _ = save_reading_progress(&state, chapter_index, &chapter_title, start_line).await;
+            return Ok(false);
+        }
+    }
     let payload =
         load_chapter(&state, book_index, chapter_index, chapter_title, start_line).await?;
     let cfg = state
@@ -213,6 +241,40 @@ async fn open_reader(
         .unwrap_or_else(|e| e.into_inner())
         .clone();
     present(&state, &app, &cfg, payload)
+}
+
+/// 设置改完，把已经开着的阅读窗口重新刷一遍。
+///
+/// 样式（背景 / 字色 / 字号 / 行高）是阅读窗口从自己那份配置里读的，
+/// 主窗口保存完不通知它，它就还按老样式显示 —— 这就是「设置不管用」。
+/// 正文本身没变，所以只是再交一次手，阅读窗口收到会重新读配置、重排。
+#[tauri::command]
+async fn refresh_reader_style(
+    app: AppHandle,
+    state: tauri::State<'_, Arc<State>>,
+    style_tick: u64,
+) -> Result<(), String> {
+    let Some(win) = app.get_webview_window("reader") else {
+        return Ok(());
+    };
+    if !win.is_visible().unwrap_or(false) {
+        return Ok(());
+    }
+    state.set_style_tick(style_tick);
+    // 手上还留着正文就原样再交一次手，阅读窗口收到会重新读配置；
+    // 没有正文（比如刚启动还没读过）就只发个通知
+    match pending_payload(&state) {
+        Some(payload) => {
+            let payload = api::ReadPayload { style_tick, ..payload };
+            state.set_pending(payload.clone());
+            win.emit("reader://load", &payload).map_err(|e| e.to_string())?;
+        }
+        None => {
+            win.emit("reader://style", style_tick)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 /// 本章翻到头：PgDn 取下一章、PgUp 取上一章，就地刷新同一个窗口。
@@ -266,6 +328,15 @@ async fn switch_chapter(
     Ok(())
 }
 
+/// 阅读窗口当前该显示的那份内容（后端留着的那一份）
+fn pending_payload(state: &Arc<State>) -> Option<api::ReadPayload> {
+    state
+        .pending
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
 async fn load_chapter(
     state: &Arc<State>,
     book_index: usize,
@@ -287,6 +358,7 @@ async fn load_chapter(
         chapter_index,
         chapter_title,
         start_line,
+        style_tick: 0,
         text,
     })
 }
@@ -298,6 +370,10 @@ fn present(
     cfg: &Config,
     payload: api::ReadPayload,
 ) -> Result<bool, String> {
+    let payload = api::ReadPayload {
+        style_tick: state.style_tick(),
+        ..payload
+    };
     state.set_pending(payload.clone());
     match app.get_webview_window("reader") {
         Some(win) => {
@@ -329,19 +405,16 @@ fn present(
     }
 }
 
-/// 阅读窗口被关掉时收尾：同步进度到服务端 + 本地记行号。
-#[tauri::command]
-async fn close_reader(
-    app: AppHandle,
-    state: tauri::State<'_, Arc<State>>,
+/// 进度收尾：本地记下读到哪一行，服务端记下读到哪一章。
+///
+/// 阅读窗口自己收起、快捷键收起、托盘退出，三处都要，所以抽出来一份。
+async fn save_reading_progress(
+    state: &Arc<State>,
     chapter_index: i64,
-    chapter_title: String,
+    chapter_title: &str,
     line: usize,
 ) -> Result<(), String> {
     let book_index = *state.current_book.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(win) = app.get_webview_window("reader") {
-        let _ = win.hide();
-    }
     if book_index < 0 {
         return Ok(());
     }
@@ -353,9 +426,24 @@ async fn close_reader(
         };
         (cfg.base_url.clone(), book)
     };
-    progress::remember(&book.book_url, chapter_index, chapter_title.clone(), line);
-    let _ = api::save_book_progress(&base, &book, chapter_index, 0, &chapter_title).await;
+    progress::remember(&book.book_url, chapter_index, chapter_title.to_string(), line);
+    let _ = api::save_book_progress(&base, &book, chapter_index, 0, chapter_title).await;
     Ok(())
+}
+
+/// 阅读窗口被关掉时收尾：同步进度到服务端 + 本地记行号。
+#[tauri::command]
+async fn close_reader(
+    app: AppHandle,
+    state: tauri::State<'_, Arc<State>>,
+    chapter_index: i64,
+    chapter_title: String,
+    line: usize,
+) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("reader") {
+        let _ = win.hide();
+    }
+    save_reading_progress(&state, chapter_index, &chapter_title, line).await
 }
 
 /// 续读点：服务端说读哪一章，本地说读到哪一行
@@ -380,6 +468,7 @@ pub fn run() {
         books: Mutex::new(Vec::new()),
         current_book: Mutex::new(-1),
         pending: Mutex::new(None),
+        style_tick: Mutex::new(0),
         toggles: Mutex::new(Vec::new()),
         app: Mutex::new(None),
     });
@@ -388,11 +477,19 @@ pub fn run() {
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {
-                    if event.state() == ShortcutState::Pressed {
-                        if let Some(state) = app.try_state::<Arc<State>>() {
-                            state.emit_toggle(Toggle::Reader);
-                        }
+                    if event.state() != ShortcutState::Pressed {
+                        return;
                     }
+                    let Some(state) = app.try_state::<Arc<State>>() else {
+                        return;
+                    };
+                    // 同一个快捷键既是呼出也是关闭：窗口开着就走 Close，
+                    // 主窗口收到后叫阅读窗口自己把进度收干净再藏起来
+                    let open = app
+                        .get_webview_window("reader")
+                        .and_then(|w| w.is_visible().ok())
+                        .unwrap_or(false);
+                    state.emit_toggle(if open { Toggle::Close } else { Toggle::Reader });
                 })
                 .build(),
         )
@@ -436,6 +533,7 @@ pub fn run() {
             cache_books,
             set_current_book,
             save_reader_size,
+            refresh_reader_style,
             resume_point,
         ])
         .run(tauri::generate_context!())

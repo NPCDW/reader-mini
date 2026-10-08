@@ -53,6 +53,10 @@ pub struct ReadPayload {
     pub chapter_title: String,
     /// 起始行；`usize::MAX` 表示「从末尾读起」（往回翻章时用）
     pub start_line: usize,
+    /// 样式版本。改了背景 / 字色 / 字号 / 行高之后，就算正文没变，
+    /// 也要让已经开着的阅读窗口重新读一次配置
+    #[serde(default)]
+    pub style_tick: u64,
     pub text: String,
 }
 

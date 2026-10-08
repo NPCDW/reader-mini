@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, onUnmounted, ref } from "vue";
+import { onMounted, onUnmounted, reactive, ref } from "vue";
 import {
   call,
   getBookshelf,
@@ -8,6 +8,7 @@ import {
   getConfig,
   on,
   openReader,
+  refreshReaderStyle,
   saveConfig,
   setCurrentBook,
 } from "./bridge";
@@ -22,19 +23,22 @@ const loading = ref(false);
 const status = ref("");
 
 const config = ref(null);
-/** 阅读窗口最近一次回传的位置，退出时用它把进度收干净 */
-const readerState = { chapterIndex: 0, title: "", line: 0 };
+/** 设置保存后递增，让已开着的阅读窗口重新读一遍样式 */
+const styleTick = ref(0);
+/** 阅读窗口最近一次回传的位置，收起 / 退出时用它把进度收干净 */
+const readerState = reactive({ chapterIndex: 0, title: "", line: 0 });
 let pollTimer = null;
 let stopTick = null;
 let stopPos = null;
 
+// 与 Rust 侧 Config::default() 同一套默认值
 const DEFAULT_CONFIG = {
   baseUrl: "http://127.0.0.1:1122",
-  readBg: "#f5f0e1",
-  readFg: "#333333",
+  readBg: "#181818",
+  readFg: "#bdbdbd",
   readFontSize: 20,
   readLineHeight: 1.5,
-  hotkey: "Ctrl+Alt+R",
+  hotkey: "Alt+PgDn",
   readerWidth: 460,
   readerHeight: 560,
 };
@@ -68,17 +72,22 @@ async function read(idx) {
   currentBook.value = idx;
   await setCurrentBook(idx);
   const book = books.value[idx];
-  const point = await call("resume_point", { bookIndex: idx }).catch(() => null);
+  const point = await call("resume_point", { bookIndex: idx }).catch(
+    () => null,
+  );
   const chapterIndex = point?.chapterIndex ?? book.durChapterIndex ?? 0;
   const title = point?.chapterTitle || book.durChapterTitle || book.name;
   status.value = `正在阅读《${book.name}》`;
   try {
-    await openReader({
+    // 返回 false = 窗口本来就开着，这次按键是「收起」，不再拿内容去刷它
+    const shown = await openReader({
       bookIndex: idx,
       chapterIndex,
       chapterTitle: title,
       startLine: point?.startLine ?? 0,
+      styleTick: styleTick.value,
     });
+    if (!shown) status.value = `已收起《${book.name}》`;
   } catch (e) {
     status.value = `打开阅读窗口失败: ${e}`;
   }
@@ -97,11 +106,13 @@ async function openChapter(chapterIndex) {
   page.value = "books";
   status.value = `正在阅读《${books.value[idx].name}》`;
   try {
+    // 从目录进是按章节读，阅读窗口开着就带上新样式一起刷新
     await openReader({
       bookIndex: idx,
       chapterIndex,
       chapterTitle: title,
       startLine: 0,
+      styleTick: styleTick.value,
     });
   } catch (e) {
     status.value = `打开阅读窗口失败: ${e}`;
@@ -137,21 +148,30 @@ async function handleToggle(name) {
     await continueReading();
     return;
   }
-  if (name !== "quit") return;
-  // 退出前先把阅读窗口收掉：它自己会把进度写回服务端，
-  // 不然这次读到的地方就丢了
-  await call("close_reader", {
-    chapterIndex: readerState.chapterIndex,
-    chapterTitle: readerState.title,
-    line: readerState.line,
-  }).catch(() => {});
-  await call("quit_app").catch(() => {});
+  // 「收起」与「退出」都要先把阅读窗口的进度收干净：
+  // 快捷键收起直接叫窗口自己收（它手上有准确的章节与行号），
+  // 退出时窗口可能已经没了，就用手上这份位置兜底
+  if (name === "close" || name === "quit") {
+    await call("close_reader", {
+      chapterIndex: readerState.chapterIndex,
+      chapterTitle: readerState.title,
+      line: readerState.line,
+    }).catch(() => {});
+  }
+  if (name === "quit") await call("quit_app").catch(() => {});
 }
 
 async function saveSettings(next) {
   try {
-    config.value = { ...DEFAULT_CONFIG, ...(await saveConfig({ ...config.value, ...next })) };
-    status.value = `设置已保存；快捷键已生效：${config.value.hotkey}`;
+    config.value = {
+      ...DEFAULT_CONFIG,
+      ...(await saveConfig({ ...config.value, ...next })),
+    };
+    // 背景色 / 字色 / 字号 / 行高改了，已经开着的阅读窗口也得换上新样式：
+    // 递增标记 + 重新呼出一次，阅读窗口收到就原地重排
+    styleTick.value += 1;
+    await refreshReaderStyle(styleTick.value).catch(() => {});
+    status.value = `设置已保存并已应用；快捷键已生效：${config.value.hotkey}`;
     return "";
   } catch (e) {
     const msg = String(e);
@@ -190,8 +210,15 @@ onUnmounted(() => {
 <template>
   <div class="shell">
     <header class="tabs">
-      <button :class="['tab', { on: tab === 'shelf' }]" @click="tab = 'shelf'">书架</button>
-      <button :class="['tab', { on: tab === 'settings' }]" @click="tab = 'settings'">设置</button>
+      <button :class="['tab', { on: tab === 'shelf' }]" @click="tab = 'shelf'">
+        书架
+      </button>
+      <button
+        :class="['tab', { on: tab === 'settings' }]"
+        @click="tab = 'settings'"
+      >
+        设置
+      </button>
       <span class="spacer" />
       <button class="tab ghost" :disabled="loading" @click="refresh">
         {{ loading ? "加载中…" : "刷新" }}
@@ -200,10 +227,16 @@ onUnmounted(() => {
 
     <main v-if="tab === 'shelf'" class="shelf">
       <template v-if="page === 'books'">
-        <article v-for="(book, i) in books" :key="book.bookUrl || i" class="book">
+        <article
+          v-for="(book, i) in books"
+          :key="book.bookUrl || i"
+          class="book"
+        >
           <div class="info">
             <h3>{{ book.name }}</h3>
-            <p class="meta">{{ book.author }} · 最新 {{ book.latestChapterTitle }}</p>
+            <p class="meta">
+              {{ book.author }} · 最新 {{ book.latestChapterTitle }}
+            </p>
             <p class="progress">
               读至 {{ book.durChapterIndex }} 章 · {{ book.durChapterTitle }}
             </p>
@@ -215,7 +248,11 @@ onUnmounted(() => {
           </div>
         </article>
         <p v-if="!books.length" class="empty">
-          {{ loading ? "正在获取书架…" : "书架为空：请先在「设置」里填写 baseUrl，再点刷新" }}
+          {{
+            loading
+              ? "正在获取书架…"
+              : "书架为空：请先在「设置」里填写 baseUrl，再点刷新"
+          }}
         </p>
       </template>
 

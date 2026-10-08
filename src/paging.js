@@ -3,30 +3,34 @@
 // 行高与整章行数都由浏览器实测，不按字号估算 —— 估算会小掉一截，
 // 一屏塞进太多行，每屏底部就会被切成「半行字」。
 
-/** 一屏能放几行：正文可视高度 ÷ 实测行高，向下取整 */
-export function rowsPerScreen(bodyHeight, lineHeight) {
+/**
+ * 一屏能放几行。
+ *
+ * 放得下的前提是最后一行的底边不越出可视区，同时它下面还要留出半行（`gap`）
+ * —— 只按 `h / 行高` 取整时，末行贴着底边，下一行的上半截正好露在下面，
+ * 就成了翻页时那「半行字」。所以按 `(可视高度 - gap) / 行高` 取整。
+ *
+ * `gap` 取行高的一半：再多就是白白少放一行字。
+ */
+export function rowsPerScreen(bodyHeight, lineHeight, gap = 0) {
   const lh = Math.max(lineHeight, 1);
-  return Math.max(Math.floor(Math.max(bodyHeight, lh) / lh), 1);
+  const h = Math.max(bodyHeight, 1);
+  return Math.max(Math.floor((h - gap) / lh), 1);
 }
 
 /**
  * 每屏顶部所在的显示行号，长度就是本章页数。
  *
- * 相邻两屏错开整整一屏行数：既不重复一行，也不漏一行。
- * 最后一屏往回收一点，让本章最后一行贴着底部，而不是留一屏空白。
+ * 每屏整整推进一屏行数：既不重复一行，也不漏一行。
+ * 这就是阅读器翻页的样子 —— 上一屏的最后一行不会又被下一屏翻出来，
+ * 下一屏也从下一行接上，不从半行字开始。
  */
 export function pageTops(totalRows, rows) {
   const step = Math.max(rows, 1);
   const n = Math.max(totalRows, 1);
-  if (n <= step) return [0];
-  const lastTop = n - step;
-  const tops = [0];
-  let top = 0;
-  while (top < lastTop) {
-    top = Math.min(top + step, lastTop);
-    tops.push(top);
-  }
-  return tops;
+  const tops = [];
+  for (let top = 0; top < n; top += step) tops.push(top);
+  return tops.length ? tops : [0];
 }
 
 /** 某个显示行落在第几屏（取顶部不超过它的最后一屏） */

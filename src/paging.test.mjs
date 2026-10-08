@@ -13,13 +13,28 @@ test("一屏几行：向下取整，宁可底部空一点也不切半行", () =>
   assert.equal(rowsPerScreen(20, 30), 1);
 });
 
-test("装得下就是一页", () => {
+test("末行下面留半个行高：下一行的半个字才不会露出来", () => {
+  // 一屏 13 行的位置、行高 30、空档 15：只能放 12 行，末行底边离下沿还有 15px
+  assert.equal(rowsPerScreen(405, 30, 15), 13);
+  assert.equal(rowsPerScreen(390, 30, 15), 12);
+  // 不算空档就会把第 13 行放进去，它的上半截露在视口里
+  assert.equal(rowsPerScreen(390, 30), 13);
+  // 高度不够一行时仍然留一行，别算出 0
+  assert.equal(rowsPerScreen(20, 30, 15), 1);
+});
+
+test("装得下也是一页", () => {
   assert.deepEqual(pageTops(5, 10), [0]);
   assert.deepEqual(pageTops(0, 10), [0]);
 });
 
 test("相邻两屏首尾相接：正文每行至少出现一次，不跳字", () => {
-  for (const [total, rows] of [[60, 17], [61, 17], [200, 17], [40, 13]]) {
+  for (const [total, rows] of [
+    [60, 17],
+    [61, 17],
+    [200, 17],
+    [40, 13],
+  ]) {
     const seen = new Set();
     for (const top of pageTops(total, rows)) {
       for (let r = top; r < Math.min(top + rows, total); r += 1) seen.add(r);
@@ -28,38 +43,30 @@ test("相邻两屏首尾相接：正文每行至少出现一次，不跳字", ()
   }
 });
 
-test("只有最后一屏会与上一屏重叠，重叠量正好是「收尾」所需的行数", () => {
-  const total = 60;
-  const rows = 17;
-  const tops = pageTops(total, rows); // [0, 17, 34, 43]
-  assert.deepEqual(tops, [0, 17, 34, 43]);
-  // 末屏从 43 起，覆盖 43..59，与上一屏重叠 34+17-43 = 8 行
-  assert.equal(tops[tops.length - 1] + rows, total);
-});
-
-test("最后一屏往回收：末行贴着底部，不留整屏空白", () => {
-  const total = 60;
-  const rows = 17;
-  const tops = pageTops(total, rows);
-  const last = tops[tops.length - 1];
-  assert.equal(last, total - rows);
-  assert.ok(last + rows === total, "末屏最后一行正好是全文最后一行");
-});
-
-test("相邻两屏最多错开一屏：中间几屏都是整屏推进", () => {
-  const tops = pageTops(200, 17);
-  for (let i = 1; i < tops.length - 1; i += 1) {
+test("只有最后一屏会不满，其它屏都是整屏推进", () => {
+  const tops = pageTops(60, 17);
+  assert.deepEqual(tops, [0, 17, 34, 51]);
+  for (let i = 1; i < tops.length; i += 1) {
     assert.equal(tops[i] - tops[i - 1], 17, `第 ${i} 屏应整屏推进 17 行`);
   }
 });
 
+test("一屏放得下整章时只有一页", () => {
+  assert.deepEqual(pageTops(17, 17), [0]);
+  assert.deepEqual(pageTops(3, 17), [0]);
+});
+
+test("末屏从上一屏的下一行开始，不重复上一屏的行", () => {
+  const tops = pageTops(60, 17); // [0, 17, 34, 51]
+  assert.equal(tops[tops.length - 1], 51, "末屏首行就是上一屏末行的下一行");
+});
+
 test("行 -> 屏：取顶部不超过它的最后一屏", () => {
-  const tops = pageTops(60, 17); // [0, 17, 34, 43]
+  const tops = pageTops(60, 17); // [0, 17, 34, 51]
   assert.equal(pageOfRow(tops, 0), 0);
   assert.equal(pageOfRow(tops, 16), 0);
   assert.equal(pageOfRow(tops, 17), 1);
-  assert.equal(pageOfRow(tops, 42), 2);
-  assert.equal(pageOfRow(tops, 43), 3);
+  assert.equal(pageOfRow(tops, 51), 3);
   assert.equal(pageOfRow(tops, 999), 3);
 });
 

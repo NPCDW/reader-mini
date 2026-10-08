@@ -24,11 +24,11 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             base_url: "http://127.0.0.1:1122".into(),
-            read_bg: "#f5f0e1".into(),
-            read_fg: "#333333".into(),
+            read_bg: "#181818".into(),
+            read_fg: "#bdbdbd".into(),
             read_font_size: 20,
             read_line_height: 1.5,
-            hotkey: "Ctrl+Alt+R".into(),
+            hotkey: "Alt+PgDn".into(),
             reader_width: 460.0,
             reader_height: 560.0,
         }
