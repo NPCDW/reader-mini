@@ -21,6 +21,8 @@ import {
 
 /** 正文左右留白，与 scoped 样式里的 .body padding 是同一个值 */
 const SIDE_PAD = 18;
+/** 标题条与正文之间的缝（.bar 的 margin-bottom），分页时算进可用高度 */
+const TOP_GAP = 6;
 /** 整章最多认多少行；超过就当量坏了，退回估行 */
 const MAX_ROWS_PER_CHAPTER = 2000;
 /** 收起时全局快捷键可能还在按住，这段时间里不接受失焦自动收起 */
@@ -95,10 +97,11 @@ const fallbackLineHeight = () =>
 function syncBodySize() {
   bodyWidth.value = window.innerWidth;
   // 容器高度已经被我们裁过（`applyViewport` 里设的），所以不能再问它要可用高度：
-  // 那会越裁越小。可用高度 = 窗口高度 − 页头 − 页脚。
+  // 那会越裁越小。可用高度 = 窗口高度 − 页头 − 页头下的缝 − 页脚。
   const available = Math.max(
     window.innerHeight -
       (barEl.value?.offsetHeight ?? 0) -
+      TOP_GAP -
       (footEl.value?.offsetHeight ?? 0),
     1,
   );
@@ -145,9 +148,12 @@ function rebuild(keepY = null) {
   // 位置必须落在实测出来的 y 上 —— 浏览器取整出来的行高会差一两个像素，
   // 按「行号 × 行高」去滚，翻几屏就会偏出半行。
   const perPage = rowsPerScreen(bodyHeight.value, lineHeight.value);
+  // 相邻两屏重叠一行：下一屏的第一行就是上一屏看得见的最后一行，
+  // 且同样贴着视口上沿 —— 翻页时上下文不断，也不会露出上一屏的残行。
+  const stride = Math.max(perPage - 1, 1);
   rowOfPage.value = pageFirstRows(
     offsets.value.length,
-    perPage,
+    stride,
     lastReachableRow(),
   );
   rowEndOfPage.value = pageEnds(offsets.value.length, rowOfPage.value, perPage);
@@ -364,12 +370,10 @@ function blurClose() {
 }
 
 async function onKeydown(event) {
-  // 呼出用的全局快捷键在窗口里再按一次就是收起，和托盘「继续阅读 / 收起」同一个语义
-  if (event.key === "PageDown" && event.altKey) {
-    event.preventDefault();
-    await close();
-    return;
-  }
+  // 带修饰键的组合（默认 Alt+PgDn 就是那个呼出 / 收起的全局快捷键）不在这里动：
+  // 它由后端的全局快捷键统一开关接管。这里再处理一次的话，同一次按键会走两条路 ——
+  // 一条把窗口收起，另一条看见窗口已经收起又把它呼出来，就成了「关掉又自己打开」。
+  if (event.ctrlKey || event.altKey || event.metaKey) return;
   const handled = {
     PageDown: () => step(1),
     PageUp: () => step(-1),
@@ -565,6 +569,9 @@ watch([fontSize, lineHeightFactor], () => {
   align-items: center;
   flex: 0 0 26px;
   height: 26px;
+  /* 标题条与正文之间的缝用 margin 留（TOP_GAP），不进正文内边距 ——
+     内边距会让「scrollTop = 行顶坐标」对不上，末行被裁、下一屏露残行 */
+  margin-bottom: 6px;
   cursor: grab;
 }
 
@@ -605,8 +612,6 @@ watch([fontSize, lineHeightFactor], () => {
 
 .text {
   margin: 0;
-  /* 顶部留一点缝，别让第一行贴着标题条 */
-  padding-top: 6px;
   font-size: var(--fs, 20px);
   line-height: var(--lh, 1.5);
   white-space: pre-wrap;
@@ -619,6 +624,9 @@ watch([fontSize, lineHeightFactor], () => {
   gap: 4px;
   flex: 0 0 24px;
   height: 24px;
+  /* 正文高度裁到整行倍数后，100vh 里难免剩一点零头：吸到窗口底部，
+     状态栏位置就不跟着正文高度晃 */
+  margin-top: auto;
 }
 
 .foot button {
@@ -647,8 +655,6 @@ watch([fontSize, lineHeightFactor], () => {
   top: 0;
   left: -99999px;
   margin: 0;
-  /* 与 .text 同一套内边距：探针量出来的高度就是正文真实占的高度 */
-  padding-top: 6px;
   visibility: hidden;
   white-space: pre-wrap;
   word-break: break-word;

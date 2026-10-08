@@ -48,8 +48,15 @@ pub struct State {
     /// 样式版本。设置页每保存一次就加一，阅读窗口据此知道该重新读配置了；
     /// 窗口起来得晚时也靠它判断「手上这份内容」是不是当前样式的
     style_tick: Mutex<u64>,
-    /// 阅读窗口刚显示出来的时刻，见 `open_reader` 里的「收起余波」判定
-    opened_at: Mutex<Option<Instant>>,
+    /// 阅读窗口开着没有。呼出 / 收起这个开关只认这一个标记
+    ///
+    /// 不问窗口的 `is_visible`：窗口刚被收起、这一下按键还没放开的时候，
+    /// 窗口管理器可能还把它算作可见，收起这一下就又被当成呼出，
+    /// 表现就是窗口关掉以后自己又弹回来。
+    reader_open: Mutex<bool>,
+    /// 上一次认下的快捷键按下时刻。按住不放会连着报「按下」，
+    /// 一次按键被算成两次，同样会关掉又打开
+    hotkey_at: Mutex<Option<Instant>>,
     toggles: Mutex<Vec<Toggle>>,
     app: Mutex<Option<AppHandle>>,
 }
@@ -75,6 +82,26 @@ impl State {
 
     fn set_style_tick(&self, tick: u64) {
         *self.style_tick.lock().unwrap_or_else(|e| e.into_inner()) = tick;
+    }
+
+    /// 阅读窗口开着没有：呼出 / 收起这个开关唯一的判据
+    fn reader_open(&self) -> bool {
+        *self.reader_open.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn set_reader_open(&self, open: bool) {
+        *self.reader_open.lock().unwrap_or_else(|e| e.into_inner()) = open;
+    }
+
+    /// 认下这一次快捷键按下；太密的那几次是按住不放的重复，不算。
+    fn mark_hotkey(&self) -> bool {
+        let mut guard = self.hotkey_at.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        if guard.map_or(false, |t| now.duration_since(t) < Duration::from_millis(250)) {
+            return false;
+        }
+        *guard = Some(now);
+        true
     }
 
     fn take_pending(&self) -> Option<api::ReadPayload> {
@@ -228,22 +255,11 @@ async fn open_reader(
     style_tick: u64,
 ) -> Result<bool, String> {
     state.set_style_tick(style_tick);
-    // 全局快捷键按第二下：窗口开着就收起，进度照常写回。
-    //
-    // 这里不按 `is_visible` 判「开着没开着」——窗口刚被收起、这个快捷键还按着的时候，
-    // 窗口管理器可能还把它算作可见，于是收起这一下又被当成「呼出」，
-    // 表现就是窗口关掉后自己又弹回来。改判「是不是刚开」：
-    // 只有真的开了一会儿的窗口，这次按键才算第二下。
+    // 第二下（快捷键 / 托盘同一个开关）：窗口开着就收起，进度照常写回。
     if let Some(win) = app.get_webview_window("reader") {
-        let fresh = state
-            .opened_at
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .map(|t| t.elapsed() < Duration::from_millis(250))
-            .unwrap_or(false);
-        if win.is_visible().unwrap_or(false) && !fresh {
+        if state.reader_open() {
             let _ = win.hide();
-            *state.opened_at.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            state.set_reader_open(false);
             let _ = save_reading_progress(&state, chapter_index, &chapter_title, start_line).await;
             return Ok(false);
         }
@@ -382,11 +398,6 @@ async fn load_chapter(
     })
 }
 
-/// 记下阅读窗口刚显示出来的时刻（收起余波的判定用）
-fn mark_opened(state: &Arc<State>) {
-    *state.opened_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
-}
-
 /// 把一份内容交给阅读窗口：已开着就原地刷新，没有才新建。
 fn present(
     state: &Arc<State>,
@@ -405,7 +416,7 @@ fn present(
                 .map_err(|e| e.to_string())?;
             let _ = win.show();
             let _ = win.set_focus();
-            mark_opened(state);
+            state.set_reader_open(true);
             Ok(true)
         }
         None => {
@@ -425,7 +436,7 @@ fn present(
                 .map_err(|e| e.to_string())?;
             win.show().map_err(|e| e.to_string())?;
             win.set_focus().map_err(|e| e.to_string())?;
-            mark_opened(state);
+            state.set_reader_open(true);
             Ok(false)
         }
     }
@@ -474,6 +485,7 @@ async fn close_reader(
     if let Some(win) = app.get_webview_window("reader") {
         let _ = win.hide();
     }
+    state.set_reader_open(false);
     save_reading_progress(&state, chapter_index, &chapter_title, line).await
 }
 
@@ -500,7 +512,8 @@ pub fn run() {
         current_book: Mutex::new(-1),
         pending: Mutex::new(None),
         style_tick: Mutex::new(0),
-        opened_at: Mutex::new(None),
+        reader_open: Mutex::new(false),
+        hotkey_at: Mutex::new(None),
         toggles: Mutex::new(Vec::new()),
         app: Mutex::new(None),
     });
@@ -515,12 +528,14 @@ pub fn run() {
                     let Some(state) = app.try_state::<Arc<State>>() else {
                         return;
                     };
+                    // 按住不放会连着报「按下」，一次按键只认一次：
+                    // 认两次的话，收起那一下紧接着又被当成呼出
+                    if !state.mark_hotkey() {
+                        return;
+                    }
                     // 同一个快捷键既是呼出也是关闭：窗口开着就走 Close，
                     // 主窗口收到后叫阅读窗口自己把进度收干净再藏起来
-                    let open = app
-                        .get_webview_window("reader")
-                        .and_then(|w| w.is_visible().ok())
-                        .unwrap_or(false);
+                    let open = state.reader_open();
                     state.emit_toggle(if open { Toggle::Close } else { Toggle::Reader });
                 })
                 .build(),

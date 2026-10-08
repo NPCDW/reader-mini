@@ -41,21 +41,18 @@ export function clipHeight(bodyHeight, lineHeight) {
 }
 
 /**
- * 每屏的首行行号，长度就是本章页数。
+ * 每屏首行行号，长度就是本章页数。
  *
  * 前面几屏从正文开头按「一屏 `step` 行」整整推进，**只有最后一屏可以不满**：
- * 它从上一屏的末行接上，一路显示到正文末尾。这样每屏最后一行都完整，
- * 下一屏的第一行就是上一屏末行的下一行。
+ * 它从上一屏的末行接上，一路显示到正文末尾。
  *
- * 最后一屏从哪儿起，取决于滚不到的问题：`scrollTop` 到内容末尾就停了，
- * 最多滚到「内容高度 − 可视高度」。按网格排出来的末屏有时比这条线更靠下，
- * 滚不到位、末行跌出视口，下沿就切出半行字。
- *
- * 规则（`bottomRow` 是滚到底时还能当作屏顶的最下面的行）：
- * - 网格末屏滚得到 → 就用网格，末屏只显示余数那几行；
- * - 滚不到 → 末屏往后让到能滚到的最后一个整屏位置
- *   （`floor(bottomRow / step) × step`），它仍然是从整屏位置上起步，
- *   而且因为滚得到，能一路显示到正文末尾。
+ * 最后一屏站在哪儿，取决于滚不到的问题：`scrollTop` 到内容末尾就停了，
+ * 最多滚到「内容高度 − 可视高度」，换算成行就是 `bottomRow`。
+ * 网格末屏（最后一个整步进位置）滚不到时，末屏**直接站到 `bottomRow`**：
+ * 它必然滚得到，而上一屏已经把 `bottomRow` 之前的行全部显示过，
+ * 末屏从这儿起步显示到正文末尾，两屏之间不会漏行。
+ * （退到「`bottomRow` 以下最后一个整步进位置」会在它与 `bottomRow`
+ * 之间留下一段哪一屏也没显示过的行，所以不能那么退。）
  *
  * 传 `null` 表示不分页（内容装得下整章）。
  */
@@ -64,16 +61,20 @@ export function pageFirstRows(totalRows, rows, bottomRow = null) {
   const n = Math.max(totalRows, 1);
   if (n <= step) return [0];
 
-  // 网格末屏：最后一个整屏位置，它负责把正文收尾
-  const gridLast = Math.floor((n - 1) / step) * step;
-  let last = gridLast;
-  if (bottomRow !== null && gridLast > Math.max(bottomRow, 0)) {
-    // 网格末屏滚不到：退到滚得到的最后一个整屏位置；退不动就只剩一屏
-    last = Math.floor(Math.max(bottomRow, 0) / step) * step;
-  }
-
   const firsts = [];
-  for (let first = 0; first <= last; first += step) firsts.push(first);
+  let first = 0;
+  for (;;) {
+    firsts.push(first);
+    // 本屏已经能一路显示到正文末尾，不用再排下一屏
+    if (first + step >= n) break;
+    const next = first + step;
+    if (bottomRow !== null && next > Math.max(bottomRow, 0)) {
+      // 网格位置滚不到了：末屏站到滚动极限行上收尾
+      if (bottomRow > first) firsts.push(Math.max(bottomRow, 0));
+      break;
+    }
+    first = next;
+  }
   return firsts.length ? firsts : [0];
 }
 
@@ -107,11 +108,8 @@ export function measureHeight(probe, text) {
 /**
  * 量一行的真实行高。
  *
- * 用「N 行的高度 − 1 行的高度」再除以 `N - 1`：探针和正文一样带顶部内边距，
- * 直接拿 N 行高度除以 N 会把这层内边距摊进每一行（20px 字号 × 1.5 的 30px
- * 会量成 30.6px），行高偏大之后分页就会少算行数、下沿切出半行字。
- * 先减掉一行的基准高度，内边距和取整误差都抵消掉了。
- *
+ * 用「N 行的高度 − 1 行的高度」再除以 `N - 1`，长度取整的零头在差分里
+ * 抵消掉，得到的才是浏览器真正排出来的行高。
  * 量不出高度（比如没有中文字体）返回 0，调用方退回按字号估。
  */
 export function lineHeightOf(probe, rows = 10) {

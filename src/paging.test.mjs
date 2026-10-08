@@ -260,13 +260,13 @@ test("页与页之间不重叠不漏行：每屏首行 = 上一屏末行的下�
 });
 
 test("末屏跟着正文末尾走：不硬凑一个装不满又滚不到的短屏", () => {
-  // 80 行 / 一屏 12 行：网格会排到 [0,12,24,36,48,60,72]，但 72 + 12 > 80，
-  // 这一屏只有 8 行、还要滚到 72 行处才看得见。改成让 60 那屏一路显示到末尾：
-  // 末屏长一点，总比多出一个滚不到的短屏、下沿切出半行字好
-  assert.deepEqual(pageFirstRows(80, 12, 68), [0, 12, 24, 36, 48, 60]);
+  // 80 行 / 一屏 12 行：网格会排到 72，但滚到底最多站到 68 行。
+  // 末屏直接站到 68，68~79 一屏收尾；60~67 由 60 那屏（显示 60~71）接住，
+  // 两屏之间不会漏行
+  assert.deepEqual(pageFirstRows(80, 12, 68), [0, 12, 24, 36, 48, 60, 68]);
   assert.deepEqual(
     pageEnds(80, pageFirstRows(80, 12, 68), 12),
-    [12, 24, 36, 48, 60, 80],
+    [12, 24, 36, 48, 60, 68, 80],
   );
   // 72 滚得到，末屏就落在网格上，正文正好收尾
   assert.deepEqual(pageFirstRows(80, 12, 72), [0, 12, 24, 36, 48, 60, 72]);
@@ -278,22 +278,47 @@ test("末屏跟着正文末尾走：不硬凑一个装不满又滚不到的短�
   );
 });
 
-test("末屏的首行不会越过上一屏：宁可末屏长一点，也不能漏行", () => {
-  // 70 滚不到网格末屏（80），退到 64；64 那屏显示 64~99（36 行）
-  assert.deepEqual(pageFirstRows(100, 16, 70), [0, 16, 32, 48, 64]);
+test("末屏站在滚动极限行上：上一屏与末屏之间不漏行", () => {
+  // 100 行 / 一屏 16 行：网格末屏 96 滚不到（极限 70），末屏站到 70；
+  // 64 那屏显示 64~79，接住 70 之前的行
+  assert.deepEqual(pageFirstRows(100, 16, 70), [0, 16, 32, 48, 64, 70]);
   assert.deepEqual(
     pageEnds(100, pageFirstRows(100, 16, 70), 16),
-    [16, 32, 48, 64, 100],
+    [16, 32, 48, 64, 70, 100],
   );
-  // 滚得到网格末屏就用网格
-  assert.deepEqual(pageFirstRows(100, 16, 84), [0, 16, 32, 48, 64, 80]);
+  // 84 也滚不到 96，末屏站到 84
+  assert.deepEqual(pageFirstRows(100, 16, 84), [0, 16, 32, 48, 64, 80, 84]);
 
-  // 90 行 / 一屏 16 行：网格末屏在 80，但 80 + 16 > 90（只有 10 行），
-  // 而且滚到底也站不到 80。于是末屏并进上一屏，让 64 那屏一路显示到末尾
-  assert.deepEqual(pageFirstRows(90, 16, 74), [0, 16, 32, 48, 64]);
+  // 90 行 / 一屏 16 行：网格末屏 80 滚不到（极限 74），末屏站到 74
+  assert.deepEqual(pageFirstRows(90, 16, 74), [0, 16, 32, 48, 64, 74]);
   assert.deepEqual(
     pageEnds(90, pageFirstRows(90, 16, 74), 16),
-    [16, 32, 48, 64, 90],
+    [16, 32, 48, 64, 74, 90],
   );
-  // 末屏一定要从头起步（第一个整屏位置），不能落在一屏中间
+});
+
+test("重叠翻页：下一屏首行 = 上一屏末行（步进 = 每屏行数 - 1）", () => {
+  // 一屏 16 行、步进 15 行：第二屏从第 15 行起，正是第一屏看得见的最后一行，
+  // 且同样贴着视口上沿。正文 43 行、滚动极限 27 行（43 - 16）
+  const perPage = 16;
+  const stride = perPage - 1;
+  const total = 43;
+  const bottomRow = total - perPage;
+  const firsts = pageFirstRows(total, stride, bottomRow);
+  const ends = pageEnds(total, firsts, perPage);
+
+  assert.deepEqual(firsts, [0, 15, 27]);
+  assert.equal(firsts[1], perPage - 1, "第二屏首行应是第一屏的末行");
+  // 每屏在 16 行的窗口里末行都完整：首行顶边贴上沿、末行底边不出下沿
+  const lh = 30;
+  const viewport = perPage * lh;
+  for (let i = 0; i < firsts.length; i += 1) {
+    const top = firsts[i];
+    const lastVisible = Math.min(top + perPage, total) - 1;
+    assert.ok(
+      (lastVisible - top + 1) * lh <= viewport,
+      `第 ${i + 1} 屏末行不完整`,
+    );
+  }
+  assert.equal(ends[ends.length - 1], total, "末屏必须显示到正文末尾");
 });
