@@ -35,5 +35,4 @@ export const switchChapter = (args) => call("switch_chapter", args);
 export const closeReader = (args) => call("close_reader", args);
 export const saveReaderSize = (width, height) =>
   call("save_reader_size", { width, height });
-export const refreshReaderStyle = (styleTick) =>
-  call("refresh_reader_style", { styleTick });
+export const refreshReaderStyle = () => call("refresh_reader_style");

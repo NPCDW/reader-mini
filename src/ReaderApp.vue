@@ -10,15 +10,12 @@ import {
   switchChapter,
   takePending,
 } from "./bridge";
-import { lineHeightOf, measureHeight, pageTops, rowsPerScreen } from "./paging";
+import { lineHeightOf, measureLines, pageOfTop, paginate } from "./paging";
 
-/** 正文上下左右的留白；顶部还要额外让出 BODY_TOP_PAD，分页时必须扣掉 */
+/** 正文左右留白，与 scoped 样式里的 .body padding 是同一个值 */
 const SIDE_PAD = 18;
-const BODY_TOP_PAD = 6;
-/** 末行下面留出的空档，按行高的比例算；见 paging.js 的 rowsPerScreen */
-const ROW_GAP_RATIO = 0.5;
-const HEAD_H = 26;
-const FOOT_H = 24;
+/** 整章最多认多少行；超过就当量坏了，退回估行（一本书的一章不会有这么多） */
+const MAX_ROWS_PER_CHAPTER = 2000;
 
 const bg = ref("#181818");
 const fg = ref("#bdbdbd");
@@ -28,11 +25,6 @@ const lineHeightFactor = ref(1.5);
 const title = ref("");
 const text = ref("");
 const chapterIndex = ref(0);
-/** 手上这份内容对应的样式版本，用来判断「配置是不是比正文新」 */
-const styleTick = ref(0);
-/** 往回翻章时后端给 usize::MAX，表示落在本章末尾 */
-const pendingLastPage = ref(false);
-
 /** 是否正在拖动标题条 */
 const dragging = ref(false);
 
@@ -43,78 +35,96 @@ const probeEl = ref(null);
 const bodyWidth = ref(0);
 const bodyHeight = ref(0);
 const lineHeight = ref(0);
-const totalRows = ref(1);
-/** 每屏顶部所在行号，长度即页数 */
+/** 每一行顶边的 y 坐标（相对正文顶部），分页/百分比的依据 */
+const offsets = ref([]);
+/** 每屏顶部所在的 y 坐标，长度即页数 */
 const tops = ref([0]);
+/** 每页装到第几行（下标不含） */
+const rowsInPage = ref([0]);
+/** 每页顶部对应的正文行，用来记进度 */
+const rowsOfTop = ref([0]);
 const pageIndex = ref(0);
 
 const pages = computed(() => Math.max(tops.value.length, 1));
 
 const pageInfo = computed(() => {
-  const total = Math.max(totalRows.value, 1);
-  const top = tops.value[pageIndex.value] ?? 0;
-  const bottom = Math.min(
-    top + rowsPerScreen(bodyHeight.value, lineHeight.value, rowGap.value),
-    total,
-  );
-  const pct = Math.round((bottom / total) * 100);
+  const total = Math.max(offsets.value.length, 1);
+  const end = rowsInPage.value[pageIndex.value] ?? 0;
+  const pct = Math.round((end / total) * 100);
   return `第 ${pageIndex.value + 1}/${pages.value} 页 · ${Math.min(Math.max(pct, 0), 100)}%`;
 });
 
-/** 末行下面留的空档：半个行高，正好挡住下一行的上半截（就是那「半行字」） */
-const rowGap = computed(() => lineHeight.value * ROW_GAP_RATIO);
+/** 正文可视区尺寸：直接问浏览器，不按页头页脚去减（多减一点就是一行字） */
+function syncBodySize() {
+  bodyWidth.value = window.innerWidth;
+  bodyHeight.value = Math.max(bodyEl.value?.clientHeight ?? 1, 1);
+}
 
 /** 量不到真实行高时的兜底：自然行高 ≈ 字号 × 1.25 × 行高倍数 */
 const fallbackLineHeight = () =>
   Math.max(fontSize.value * lineHeightFactor.value * 1.25, 1);
 
-/** 正文可视区尺寸跟着窗口走 */
-function syncBodySize() {
-  bodyWidth.value = window.innerWidth;
-  bodyHeight.value = Math.max(
-    window.innerHeight - HEAD_H - FOOT_H - BODY_TOP_PAD,
-    1,
-  );
+/** 探针调到与正文一模一样的排版：同宽、同字号、同行高、同 padding 补偿 */
+function syncProbe() {
+  const el = probeEl.value;
+  if (!el) return;
+  el.style.width = `${Math.max(bodyWidth.value - SIDE_PAD * 2, 80)}px`;
+  el.style.fontSize = `${fontSize.value}px`;
+  el.style.lineHeight = String(lineHeightFactor.value);
 }
 
 /**
- * 按当前窗口尺寸与字号重建行高、整章行数与分页表。
+ * 重建行位置与分页表。
  *
- * 一屏几行 = 正文可视高度 ÷ 实测行高，整章几行 = 实测全文高度 ÷ 实测行高，
- * 所以改字号、换章、拉伸窗口之后都要重算一遍。
- * 重建后尽量停在原来那一屏对应的行上。
+ * 行位置由浏览器逐段量出来（`measureLines` 量不到就退回按行高估行）：
+ * 「整章总高度 ÷ 行高」反推出来的行数只要多一行，最后一屏就会被顶出半行字，
+ * 分页只按量出来的 y 算，一屏装到「底边还在屏幕里」的最后一行为止。
+ *
+ * `keepTop` 是重建后要停住的那个位置（正文 y），不给就停在当前页顶部。
  */
-function rebuild(keepRow = null) {
-  if (!probeEl.value) return;
-  const anchor = keepRow ?? tops.value[pageIndex.value] ?? 0;
+function rebuild(keepTop = null) {
+  if (!probeEl.value || !bodyEl.value) return;
+  const anchor = keepTop ?? tops.value[pageIndex.value] ?? 0;
 
-  probeEl.value.style.width = `${Math.max(bodyWidth.value - SIDE_PAD * 2, 80)}px`;
-  probeEl.value.style.fontSize = `${fontSize.value}px`;
-  probeEl.value.style.lineHeight = String(lineHeightFactor.value);
-
+  syncProbe();
   const lh = lineHeightOf(probeEl.value, 10);
   lineHeight.value = lh > 0 ? lh : fallbackLineHeight();
 
-  const h = measureHeight(probeEl.value, text.value);
-  totalRows.value =
-    h > lineHeight.value / 2
-      ? Math.max(Math.round(h / lineHeight.value), 1)
-      : 1;
-
-  tops.value = pageTops(
-    totalRows.value,
-    rowsPerScreen(bodyHeight.value, lineHeight.value, rowGap.value),
+  const measured = measureLines(
+    probeEl.value,
+    text.value,
+    lineHeight.value,
+    MAX_ROWS_PER_CHAPTER,
   );
-  const idx = tops.value.findIndex((t) => t >= anchor);
-  pageIndex.value = idx < 0 ? tops.value.length - 1 : idx;
+  offsets.value = measured ?? estimatedOffsets();
+
+  const { tops: nextTops, pages: nextPages } = paginate(
+    offsets.value,
+    bodyHeight.value,
+    bodyEl.value.scrollHeight,
+    bodyEl.value.scrollTop,
+  );
+  tops.value = nextTops;
+  rowsInPage.value = nextPages.map((p) => p.end);
+  rowsOfTop.value = nextPages.map((p) =>
+    offsets.value.findIndex((y) => y >= p.top - 0.5),
+  );
+  pageIndex.value = pageOfTop(tops.value, anchor);
   applyPage();
 }
 
-/** 当前屏顶部贴着正文可视区上沿 */
+/** 量不到逐行高度时的兜底：按行高铺满整章 */
+function estimatedOffsets() {
+  const lh = Math.max(lineHeight.value, 1);
+  const h = Math.max(bodyEl.value?.scrollHeight ?? lh, lh);
+  const n = Math.max(Math.round(h / lh), 1);
+  return new Array(n).fill(0).map((_, i) => i * lh);
+}
+
+/** 当前屏顶部贴着正文可视区上沿；位置是正文 y，不是行号 */
 function applyPage() {
   if (!scrollerEl.value) return;
-  scrollerEl.value.scrollTop =
-    (tops.value[pageIndex.value] ?? 0) * lineHeight.value;
+  scrollerEl.value.scrollTop = tops.value[pageIndex.value] ?? 0;
 }
 
 function gotoPage(index) {
@@ -123,26 +133,10 @@ function gotoPage(index) {
   reportPosition();
 }
 
-/**
- * 当前读到正文的第几个逻辑行（按 `\n` 分段），用来记住进度。
- *
- * 显示行 -> 逻辑行靠「每段占几个显示行」累加反推：正文是中文单栏排版，
- * 这个换算只在记进度时用，差一行不影响续读的体感。
- */
-const currentLine = computed(() => {
-  const topRows = tops.value[pageIndex.value] ?? 0;
-  const perRow = Math.max(
-    Math.floor((bodyWidth.value - SIDE_PAD * 2) / Math.max(fontSize.value, 6)),
-    8,
-  );
-  const lines = text.value.split("\n");
-  let rows = 0;
-  for (let i = 0; i < lines.length; i += 1) {
-    rows += Math.max(Math.ceil((lines[i].length + 1) / perRow), 1);
-    if (rows > topRows) return i;
-  }
-  return Math.max(lines.length - 1, 0);
-});
+/** 当前读到正文的第几个逻辑行（按 `\n` 分段），用来记住进度 */
+const currentLine = computed(() =>
+  Math.max(rowsOfTop.value[pageIndex.value] ?? 0, 0),
+);
 
 /**
  * 把「现在读到哪」告诉主窗口。
@@ -160,26 +154,22 @@ function reportPosition() {
 
 async function load(payload) {
   if (!payload) return;
+  const sameChapter = chapterIndex.value === (payload.chapterIndex ?? 0);
   chapterIndex.value = payload.chapterIndex ?? 0;
   title.value = payload.chapterTitle || "";
-  const keepPage = pageIndex.value;
-  const sameText = styleTick.value > 0 && payload.styleTick === styleTick.value;
   text.value = payload.text || "";
-  styleTick.value = payload.styleTick ?? 0;
-  pendingLastPage.value = (payload.startLine ?? 0) > 1_000_000;
+  // 往回翻章时后端给 usize::MAX，表示落在本章末尾
+  const toEnd = (payload.startLine ?? 0) > 1_000_000;
+  // 换章 / 续读要跳到新位置；同一章原地刷新（保存设置、拉伸窗口）就停在原地，
+  // 别把读者踢回页首
+  const keepTop =
+    sameChapter && !toEnd ? (tops.value[pageIndex.value] ?? 0) : null;
 
-  // 每次展示都重新读一遍配置：设置页改完样式会重新交一次手，这里就是生效的地方
+  // 每次展示都重新读一遍配置：设置页保存后重新交一次手，这里就是样式生效的地方
   applyStyle(await getConfig().catch(() => ({})));
   await nextTick();
-  if (sameText) {
-    // 只是重刷样式（正文没换）：留在原来那一屏，别把读者踢回页首
-    rebuild();
-    pageIndex.value = Math.min(keepPage, pages.value - 1);
-    applyPage();
-    return;
-  }
-  rebuild();
-  gotoPage(pendingLastPage.value ? pages.value - 1 : 0);
+  rebuild(keepTop);
+  if (keepTop === null) gotoPage(toEnd ? pages.value - 1 : 0);
 }
 
 /** PgUp / PgDn：本章内翻一屏，翻到本章头尾就换到相邻一章 */
@@ -335,31 +325,31 @@ onMounted(async () => {
   stopLoad = await on("reader://load", (event) => load(event.payload));
   // 同一个快捷键的第二下是「关闭」：后端发这个事件让窗口自己收干净
   stopToggle = await on("reader://toggle", () => close());
-  // 手上没有正文时，样式改了只重读配置
+  // 手上没有正文时（还没读过书），样式改了只重读配置
   stopStyle = await on("reader://style", async (event) => {
-    styleTick.value = event.payload ?? styleTick.value;
     applyStyle(await getConfig().catch(() => ({})));
     await nextTick();
     rebuild();
   });
 
   applyStyle(await getConfig().catch(() => ({})));
+  // 先取一次：窗口是异步起来的，后端可能在页面开始监听前就发过事件了。
+  // 取完不给它 clear —— 它同时是「当前该显示的那份内容」，保存设置后后端
+  // 要拿它再交一次手
+  const initial = await takePending().catch(() => null);
+  if (initial) await load(initial);
+
   syncBodySize();
-  // 窗口尺寸变了就按新尺寸重算分页；正文本身高度变化也会触发，rebuild 是幂等的
+  rebuild();
+  // 窗口尺寸变了（或正文自己换了行数）就按新尺寸重排，并防抖落盘。
+  // 尺寸以浏览器给的为准：正文容器的高度多减/少减一点，正好就是一行字。
   observer = new ResizeObserver(() => {
-    const prevW = bodyWidth.value;
-    const prevH = bodyHeight.value;
     syncBodySize();
-    if (prevW === bodyWidth.value && prevH === bodyHeight.value) return;
     rebuild();
     schedulePersist();
   });
-  observer.observe(document.documentElement);
+  observer.observe(document.body);
   if (bodyEl.value) observer.observe(bodyEl.value);
-
-  // 先取一次：窗口是异步起来的，后端建窗口时发的那个事件我们可能没赶上
-  const initial = await takePending().catch(() => null);
-  if (initial) await load(initial);
   // 首次装载也记一次：窗口被系统缩放（HiDPI）或用户从不拉伸时，
   // 配置里也该有真实尺寸，下次打开才不会大小跳一下
   await persistSize();
@@ -382,6 +372,16 @@ onUnmounted(() => {
 // 字号与行高倍数直接决定行高与整章行数，变了必须重排；颜色只走 CSS 变量，不用动排版
 watch([fontSize, lineHeightFactor], () => {
   nextTick(() => rebuild());
+});
+
+// 窗口被挪到屏幕外时再按 PgDn，光改 scrollTop 浏览器不会去排新内容 ——
+// 那一屏就会停在半行字上。用焦点把窗口托回可见区（只在窗口不可见时才做，
+// 免得平时翻页平白抢焦点）
+watch(pageIndex, async () => {
+  await nextTick();
+  const win = getCurrentWindow();
+  const visible = await win.isVisible().catch(() => true);
+  if (!visible) await win.setFocus().catch(() => {});
 });
 </script>
 
@@ -466,7 +466,6 @@ watch([fontSize, lineHeightFactor], () => {
 
 .text {
   margin: 0;
-  /* 顶部内边距与 BODY_TOP_PAD 是同一个值 */
   padding-top: 6px;
   font-size: var(--fs, 20px);
   line-height: var(--lh, 1.5);

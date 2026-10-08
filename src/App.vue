@@ -23,8 +23,6 @@ const loading = ref(false);
 const status = ref("");
 
 const config = ref(null);
-/** 设置保存后递增，让已开着的阅读窗口重新读一遍样式 */
-const styleTick = ref(0);
 /** 阅读窗口最近一次回传的位置，收起 / 退出时用它把进度收干净 */
 const readerState = reactive({ chapterIndex: 0, title: "", line: 0 });
 let pollTimer = null;
@@ -85,7 +83,6 @@ async function read(idx) {
       chapterIndex,
       chapterTitle: title,
       startLine: point?.startLine ?? 0,
-      styleTick: styleTick.value,
     });
     if (!shown) status.value = `已收起《${book.name}》`;
   } catch (e) {
@@ -112,7 +109,6 @@ async function openChapter(chapterIndex) {
       chapterIndex,
       chapterTitle: title,
       startLine: 0,
-      styleTick: styleTick.value,
     });
   } catch (e) {
     status.value = `打开阅读窗口失败: ${e}`;
@@ -168,9 +164,8 @@ async function saveSettings(next) {
       ...(await saveConfig({ ...config.value, ...next })),
     };
     // 背景色 / 字色 / 字号 / 行高改了，已经开着的阅读窗口也得换上新样式：
-    // 递增标记 + 重新呼出一次，阅读窗口收到就原地重排
-    styleTick.value += 1;
-    await refreshReaderStyle(styleTick.value).catch(() => {});
+    // 叫它重新读一遍配置并原地重排（正文没变，位置也不动）
+    await refreshReaderStyle().catch(() => {});
     status.value = `设置已保存并已应用；快捷键已生效：${config.value.hotkey}`;
     return "";
   } catch (e) {
