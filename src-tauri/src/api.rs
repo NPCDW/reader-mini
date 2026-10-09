@@ -48,7 +48,9 @@ pub struct Chapter {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadPayload {
-    pub book_index: usize,
+    /// 这本书的 `bookUrl`。跨窗口流转一律靠它认书 —— 服务端可能刚在别处
+    /// 按阅读时间重排过书架，下标会串到别的书上
+    pub book_url: String,
     pub chapter_index: i64,
     pub chapter_title: String,
     /// 起始行；`usize::MAX` 表示「从末尾读起」（往回翻章时用）

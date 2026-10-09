@@ -40,8 +40,9 @@ pub struct State {
     pub config: Mutex<Config>,
     /// 书架缓存：快捷键续读与托盘「继续阅读」都要用
     pub books: Mutex<Vec<api::Book>>,
-    /// 当前在读的书在书架里的下标，-1 表示还没选过
-    pub current_book: Mutex<i64>,
+    /// 当前在读的那本书的 `bookUrl`。跨命令认书一律用它 —— 服务端可能按阅读
+    /// 时间重排书架，下标会指到别的书上。空串表示还没选过
+    pub current_url: Mutex<String>,
     /// 最近一次要展示的正文。阅读窗口是异步起来的，事件可能在它开始监听前就发完了，
     /// 所以内容同时留在这里，窗口上报「已就绪」时自己取走。
     pending: Mutex<Option<api::ReadPayload>>,
@@ -59,12 +60,34 @@ pub struct State {
     hotkey_at: Mutex<Option<Instant>>,
     toggles: Mutex<Vec<Toggle>>,
     app: Mutex<Option<AppHandle>>,
-    /// 上一次上报给服务端的进度（书下标、章、行、位置）。
+    /// 上一次上报给服务端的进度（书 `bookUrl`、章、行、位置）。
     /// 翻页攒出来的重复上报在这里被挡掉，不必真发一次请求
-    last_saved: Mutex<Option<(usize, i64, usize, i64)>>,
+    last_saved: Mutex<Option<(String, i64, usize, i64)>>,
 }
 
 impl State {
+    /// 书架上按 `bookUrl` 找书。
+    ///
+    /// 书架上的每一处认书都走这里，不按下标取：服务端可能按阅读时间重排书架，
+    /// 拿旧下标去取会取到另一本书上（表现是「读了 A，进度记到 B 头上」）。
+    fn find_book(books: &[api::Book], book_url: &str) -> Option<api::Book> {
+        books.iter().find(|b| b.book_url == book_url).cloned()
+    }
+
+    /// 缓存里那本正在读的书。没选过书 / 书已经不在书架上时返回 `None`
+    fn current_book(&self) -> Option<api::Book> {
+        let url = self
+            .current_url
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if url.is_empty() {
+            return None;
+        }
+        let books = self.books.lock().unwrap_or_else(|e| e.into_inner());
+        Self::find_book(&books, &url)
+    }
+
     pub fn emit_toggle(&self, toggle: Toggle) {
         self.toggles
             .lock()
@@ -100,7 +123,9 @@ impl State {
     fn mark_hotkey(&self) -> bool {
         let mut guard = self.hotkey_at.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
-        if guard.map_or(false, |t| now.duration_since(t) < Duration::from_millis(250)) {
+        if guard.map_or(false, |t| {
+            now.duration_since(t) < Duration::from_millis(250)
+        }) {
             return false;
         }
         *guard = Some(now);
@@ -170,7 +195,11 @@ fn parse_color(hex: &str) -> tauri::window::Color {
         3 => s
             .chars()
             .nth(0)
-            .and_then(|a| s.chars().nth(1).and_then(|b| s.chars().nth(2).map(|c| (a, b, c))))
+            .and_then(|a| {
+                s.chars()
+                    .nth(1)
+                    .and_then(|b| s.chars().nth(2).map(|c| (a, b, c)))
+            })
             .and_then(|(r, g, b)| {
                 let expand = |c: char| u8::from_str_radix(&format!("{c}{c}"), 16).ok();
                 expand(r).zip(expand(g)).zip(expand(b))
@@ -252,15 +281,21 @@ async fn get_chapter_list(
         .map_err(|e| e.to_string())
 }
 
-/// 主窗口刷新书架后缓存下来，供快捷键 / 托盘续读使用
+/// 主窗口刷新书架后缓存下来，供快捷键 / 托盘续读使用。
+///
+/// 回一个「手上这本还在不在」：书架是被远端刷新的，正在读的那本书可能已经被
+/// 移出书架了（此时进度不该再往服务端写）。
 #[tauri::command]
-fn cache_books(state: tauri::State<'_, Arc<State>>, books: Vec<api::Book>) {
+fn cache_books(state: tauri::State<'_, Arc<State>>, books: Vec<api::Book>) -> bool {
     *state.books.lock().unwrap_or_else(|e| e.into_inner()) = books;
+    state.current_book().is_some()
 }
 
+/// 记下「现在读的是哪本书」。收 `bookUrl` 而不是下标：远端重排书架之后，
+/// 主窗口手上那个下标可能已经指到别的书上了
 #[tauri::command]
-fn set_current_book(state: tauri::State<'_, Arc<State>>, index: i64) {
-    *state.current_book.lock().unwrap_or_else(|e| e.into_inner()) = index;
+fn set_current_book(state: tauri::State<'_, Arc<State>>, book_url: String) {
+    *state.current_url.lock().unwrap_or_else(|e| e.into_inner()) = book_url;
 }
 
 /// 阅读窗口每次装载 / 拉伸后回写，下次打开还是这个大小
@@ -283,7 +318,7 @@ fn save_reader_size(state: tauri::State<'_, Arc<State>>, width: f32, height: f32
 async fn open_reader(
     app: AppHandle,
     state: tauri::State<'_, Arc<State>>,
-    book_index: usize,
+    book_url: String,
     chapter_index: i64,
     chapter_title: String,
     start_line: usize,
@@ -291,6 +326,11 @@ async fn open_reader(
     style_tick: u64,
 ) -> Result<bool, String> {
     state.set_style_tick(style_tick);
+    // 主窗口手上的下标可能已经过期（远端刚重排过书架），所以认书只认 bookUrl
+    {
+        let mut cur = state.current_url.lock().unwrap_or_else(|e| e.into_inner());
+        *cur = book_url.clone();
+    }
     // 第二下（快捷键 / 托盘同一个开关）：窗口开着就收起，进度照常写回。
     if let Some(win) = app.get_webview_window("reader") {
         if state.reader_open() {
@@ -307,8 +347,7 @@ async fn open_reader(
             return Ok(false);
         }
     }
-    let payload =
-        load_chapter(&state, book_index, chapter_index, chapter_title, start_line).await?;
+    let payload = load_chapter(&state, &book_url, chapter_index, chapter_title, start_line).await?;
     let cfg = state
         .config
         .lock()
@@ -368,17 +407,13 @@ async fn switch_chapter(
     current_index: i64,
     direction: i32,
 ) -> Result<(), String> {
-    let book_index = *state.current_book.lock().unwrap_or_else(|e| e.into_inner());
-    if book_index < 0 {
-        return Err("请先从书架打开一本书".into());
-    }
-    let book_index = book_index as usize;
-    let (base, book) = {
-        let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
-        let books = state.books.lock().unwrap_or_else(|e| e.into_inner());
-        let book = books.get(book_index).cloned().ok_or("书架上找不到这本书")?;
-        (cfg.base_url.clone(), book)
-    };
+    let book = state.current_book().ok_or("请先从书架打开一本书")?;
+    let base = state
+        .config
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .base_url
+        .clone();
     let chapters = api::get_chapter_list(&base, &book.book_url)
         .await
         .map_err(|e| e.to_string())?;
@@ -399,7 +434,7 @@ async fn switch_chapter(
     };
     // 往回翻落到上一章末尾，往下翻从开头读
     let start_line = if direction < 0 { usize::MAX } else { 0 };
-    let payload = load_chapter(&state, book_index, target, title, start_line).await?;
+    let payload = load_chapter(&state, &book.book_url, target, title, start_line).await?;
     let cfg = state
         .config
         .lock()
@@ -420,16 +455,20 @@ fn pending_payload(state: &Arc<State>) -> Option<api::ReadPayload> {
 
 async fn load_chapter(
     state: &Arc<State>,
-    book_index: usize,
+    book_url: &str,
     chapter_index: i64,
     chapter_title: String,
     start_line: usize,
 ) -> Result<api::ReadPayload, String> {
-    let (base, book) = {
-        let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
+    let base = state
+        .config
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .base_url
+        .clone();
+    let book = {
         let books = state.books.lock().unwrap_or_else(|e| e.into_inner());
-        let book = books.get(book_index).cloned().ok_or("书架上找不到这本书")?;
-        (cfg.base_url.clone(), book)
+        State::find_book(&books, book_url).ok_or("书架上找不到这本书")?
     };
     // 正文位置以字数计（本章第一屏是 0，翻到第 N 屏就是前 N-1 屏那几个字）。
     // 载入时把书架上那个值带上，阅读窗口据此定位到上次读的那一屏，
@@ -443,7 +482,7 @@ async fn load_chapter(
         .await
         .map_err(|e| e.to_string())?;
     Ok(api::ReadPayload {
-        book_index,
+        book_url: book.book_url.clone(),
         chapter_index,
         chapter_title,
         start_line,
@@ -511,18 +550,17 @@ async fn save_reading_progress(
     line: usize,
     pos: i64,
 ) -> Result<(), String> {
-    let book_index = *state.current_book.lock().unwrap_or_else(|e| e.into_inner());
-    if book_index < 0 {
+    // 读的是哪本书由 `current_url` 说了算 —— 藏书那本书的位置没有别的来源。
+    // 书不在书架上（被远端移走了）就没有 bookUrl 可用，这次不写
+    let Some(book) = state.current_book() else {
         return Ok(());
-    }
-    let (base, book) = {
-        let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
-        let books = state.books.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(book) = books.get(book_index as usize).cloned() else {
-            return Ok(());
-        };
-        (cfg.base_url.clone(), book)
     };
+    let base = state
+        .config
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .base_url
+        .clone();
     progress::remember(
         &book.book_url,
         chapter_index,
@@ -541,7 +579,7 @@ async fn save_reading_progress(
 #[tauri::command]
 async fn save_progress(
     state: tauri::State<'_, Arc<State>>,
-    book_index: usize,
+    book_url: String,
     chapter_index: i64,
     chapter_title: String,
     line: usize,
@@ -549,21 +587,24 @@ async fn save_progress(
 ) -> Result<(), String> {
     {
         let mut last = state.last_saved.lock().unwrap_or_else(|e| e.into_inner());
-        let same = last.as_ref().is_some_and(|p| {
-            p.0 == book_index && p.1 == chapter_index && p.2 == line && p.3 == pos
-        });
+        let same = last
+            .as_ref()
+            .is_some_and(|p| p.0 == book_url && p.1 == chapter_index && p.2 == line && p.3 == pos);
         if same {
             return Ok(());
         }
-        *last = Some((book_index, chapter_index, line, pos));
+        *last = Some((book_url.clone(), chapter_index, line, pos));
     }
-    let (base, book) = {
-        let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
+    let base = state
+        .config
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .base_url
+        .clone();
+    // 按 bookUrl 认书：阅读窗口手上那个下标是它拿到正文时的，远端重排过书架就不作数了
+    let book = {
         let books = state.books.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(book) = books.get(book_index).cloned() else {
-            return Err("书架上找不到这本书".into());
-        };
-        (cfg.base_url.clone(), book)
+        State::find_book(&books, &book_url).ok_or("书架上找不到这本书")?
     };
     api::save_book_progress(&base, &book, chapter_index, pos, &chapter_title)
         .await
@@ -604,14 +645,17 @@ async fn close_reader(
     Ok(())
 }
 
-/// 续读点：服务端说读哪一章，本地说读到哪一行
+/// 续读点：服务端说读哪一章，本地说读到哪一行。
+///
+/// 收 `bookUrl`：主窗口点「阅读」时手上的下标可能已经过期，
+/// 拿下标去取会续到另一本书上（本地那份行号也跟着串过去）
 #[tauri::command]
 fn resume_point(
     state: tauri::State<'_, Arc<State>>,
-    book_index: usize,
+    book_url: String,
 ) -> Result<progress::Resume, String> {
     let books = state.books.lock().unwrap_or_else(|e| e.into_inner());
-    let book = books.get(book_index).ok_or("书架上找不到这本书")?;
+    let book = State::find_book(&books, &book_url).ok_or("书架上找不到这本书")?;
     Ok(progress::resume(
         &book.book_url,
         book.dur_chapter_index,
@@ -624,7 +668,7 @@ pub fn run() {
     let state = Arc::new(State {
         config: Mutex::new(cfg.clone()),
         books: Mutex::new(Vec::new()),
-        current_book: Mutex::new(-1),
+        current_url: Mutex::new(String::new()),
         pending: Mutex::new(None),
         style_tick: Mutex::new(0),
         reader_open: Mutex::new(false),
@@ -702,4 +746,68 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("reader-mini 启动失败");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn book(url: &str, name: &str) -> api::Book {
+        api::Book {
+            book_url: url.into(),
+            name: name.into(),
+            ..Default::default()
+        }
+    }
+
+    /// 书架是照书找的，不是照下标。
+    ///
+    /// 远端按阅读时间重排书架之后，主窗口手上那个下标已经指到别的书上，
+    /// 照下标续读就会「读 A 续到 B」—— 这正是要按 `bookUrl` 认书的原因。
+    #[test]
+    fn book_is_found_by_url_after_the_shelf_is_reordered() {
+        let shelf = [
+            book("https://example.org/a", "甲"),
+            book("https://example.org/b", "乙"),
+        ];
+        // 读者点的是「甲」（下标 0）
+        let target = shelf[0].book_url.clone();
+
+        // 远端把「乙」排到了前面：原来那个下标下已经是另一本书了
+        let reordered = [
+            book("https://example.org/b", "乙"),
+            book("https://example.org/a", "甲"),
+        ];
+        assert_eq!(reordered[0].name, "乙");
+        assert_eq!(State::find_book(&reordered, &target).unwrap().name, "甲");
+    }
+
+    /// 书被远端移出书架之后找不到，也就不该再往上写进度
+    #[test]
+    fn missing_book_has_no_match() {
+        let shelf = vec![book("https://example.org/a", "甲")];
+        assert!(State::find_book(&shelf, "https://example.org/gone").is_none());
+    }
+
+    /// 交给阅读窗口的正文里必须带上 `bookUrl`：阅读窗口只看过这份 payload，
+    /// 上报进度时下标可能已经过期，唯一靠得住的认书凭据就是这个字段
+    #[test]
+    fn read_payload_carries_the_book_url() {
+        let payload = api::ReadPayload {
+            book_url: "https://example.org/a".into(),
+            chapter_index: 2,
+            chapter_title: "第二章".into(),
+            start_line: 0,
+            dur_chapter_pos: 0,
+            style_tick: 0,
+            reposition: true,
+            text: "正文".into(),
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(
+            json.contains(r#""bookUrl":"https://example.org/a""#),
+            "{json}"
+        );
+        assert!(!json.contains("bookIndex"), "不该再有下标字段: {json}");
+    }
 }

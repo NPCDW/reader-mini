@@ -27,7 +27,7 @@ const config = ref(null);
 const styleTick = ref(0);
 /** 阅读窗口最近一次回传的位置，收起 / 退出时用它把进度收干净 */
 const readerState = reactive({
-  bookIndex: -1,
+  bookUrl: "",
   chapterIndex: 0,
   title: "",
   line: 0,
@@ -85,9 +85,11 @@ async function refresh(quiet = false) {
 async function read(idx) {
   if (idx < 0 || idx >= books.value.length) return;
   currentBook.value = idx;
-  await setCurrentBook(idx);
+  // 认书一律用 bookUrl：远端可能刚把书架重排过，这个下标指的是眼前这份列表，
+  // 等它传到后端时可能已经指到别的书上了
   const book = books.value[idx];
-  const point = await call("resume_point", { bookIndex: idx }).catch(
+  await setCurrentBook(book.bookUrl);
+  const point = await call("resume_point", { bookUrl: book.bookUrl }).catch(
     () => null,
   );
   const chapterIndex = point?.chapterIndex ?? book.durChapterIndex ?? 0;
@@ -96,13 +98,13 @@ async function read(idx) {
   try {
     // 返回 false = 窗口本来就开着，这次按键是「收起」，不再拿内容去刷它
     const shown = await openReader({
-      bookIndex: idx,
+      bookUrl: book.bookUrl,
       chapterIndex,
       chapterTitle: title,
       startLine: point?.startLine ?? 0,
       // 窗口本来就开着时这一下是「收起」：带上阅读窗口最近回传的正文位置，
       // 后端才不会把进度写成打开时那个位置（等于把这一路翻的几屏退回去）
-      pos: readerState.bookIndex === idx ? readerState.pos ?? 0 : 0,
+      pos: readerState.bookUrl === book.bookUrl ? readerState.pos ?? 0 : 0,
       styleTick: styleTick.value,
     });
     if (!shown) status.value = `已收起《${book.name}》`;
@@ -118,15 +120,16 @@ async function openChapter(chapterIndex) {
     status.value = "请先从书架打开一本书的目录";
     return;
   }
+  const book = books.value[idx];
   const ch = chapters.value[chapterIndex];
   // 目录下标就是 getBookContent 的 index，不能因为空标题重新编号
   const title = ch?.title || `第${chapterIndex + 1}章`;
   page.value = "books";
-  status.value = `正在阅读《${books.value[idx].name}》`;
+  status.value = `正在阅读《${book.name}》`;
   try {
     // 从目录进是按章节读，阅读窗口开着就带上新样式一起刷新
     await openReader({
-      bookIndex: idx,
+      bookUrl: book.bookUrl,
       chapterIndex,
       chapterTitle: title,
       startLine: 0,
@@ -141,7 +144,7 @@ async function openChapter(chapterIndex) {
 
 async function openToc(idx) {
   currentBook.value = idx;
-  await setCurrentBook(idx);
+  await setCurrentBook(books.value[idx].bookUrl);
   page.value = "toc";
   loading.value = true;
   try {

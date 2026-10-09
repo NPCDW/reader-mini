@@ -60,8 +60,8 @@ const closeOnBlur = ref(false);
 const title = ref("");
 const text = ref("");
 const chapterIndex = ref(0);
-/** 当前这本书在书架里的下标，上报进度要用；-1 表示没书 */
-const bookIndex = ref(-1);
+/** 当前这本书的 bookUrl，上报进度要用它认书；空串表示还没拿到书 */
+const bookUrl = ref("");
 /** 服务端记的上次读到的正文位置（以字数计）；换章时为 0 —— 新章从头读起 */
 const resumePos = ref(0);
 /** 手上这份内容对应的样式版本，用来判断「配置是不是比正文新」 */
@@ -328,7 +328,7 @@ const durChapterPos = computed(() => {
  */
 function reportPosition() {
   send("reader://position", {
-    bookIndex: bookIndex.value,
+    bookUrl: bookUrl.value,
     chapterIndex: chapterIndex.value,
     title: title.value,
     line: currentLine.value,
@@ -338,9 +338,9 @@ function reportPosition() {
 
 /** 手上这本书读到哪了；还没拿到书（窗口刚起来）就不上报 */
 function progressArgs() {
-  if (bookIndex.value < 0 || !text.value) return null;
+  if (!bookUrl.value || !text.value) return null;
   return {
-    bookIndex: bookIndex.value,
+    bookUrl: bookUrl.value,
     chapterIndex: chapterIndex.value,
     chapterTitle: title.value,
     line: currentLine.value,
@@ -393,7 +393,7 @@ function startPage() {
 
 async function load(payload) {
   if (!payload) return;
-  bookIndex.value = payload.bookIndex ?? -1;
+  bookUrl.value = payload.bookUrl ?? "";
   chapterIndex.value = payload.chapterIndex ?? 0;
   title.value = payload.chapterTitle || "";
   resumePos.value = payload.durChapterPos ?? 0;
