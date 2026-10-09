@@ -8,6 +8,8 @@ import {
   send,
   saveProgress,
   saveReaderSize,
+  styleAcknowledged,
+  styleApplied,
   switchChapter,
   takePending,
 } from "./bridge";
@@ -66,6 +68,8 @@ const bookUrl = ref("");
 const resumePos = ref(0);
 /** 手上这份内容对应的样式版本，用来判断「配置是不是比正文新」 */
 const styleTick = ref(0);
+/** 后端手上那份内容的样式版本；比 `styleTick` 新就说明我们手上是旧的 */
+const latestTick = ref(0);
 /** 往回翻章时后端给 usize::MAX，表示落在本章末尾 */
 const pendingLastPage = ref(false);
 
@@ -174,7 +178,8 @@ function rebuild(keepY = null) {
 
   const measured = measuredRows();
   offsets.value = measured?.offsets ?? estimatedOffsets();
-  rowChars.value = measured?.rowChars ?? estimatedRowChars(offsets.value.length);
+  rowChars.value =
+    measured?.rowChars ?? estimatedRowChars(offsets.value.length);
 
   // 同一条分页表的两种单位：行号用来算百分比 / 记进度，y 用来滚到位置。
   // 位置必须落在实测出来的 y 上 —— 浏览器取整出来的行高会差一两个像素，
@@ -404,23 +409,26 @@ async function load(payload) {
   pendingLastPage.value = (payload.startLine ?? 0) > 1_000_000;
 
   // 每次展示都重新读一遍配置：设置页改完样式会重新交一次手，这里就是生效的地方
-  applyStyle(await getConfig().catch(() => ({})));
+  const tick = await syncStyle();
   await nextTick();
   // 只是重刷样式（正文没换，也不是要重新打开）：留在原来那一屏，别把读者踢回页首。
   // 同一本同一章再点一次「阅读」也算重新打开 —— 服务端记的位置可能已经在别处
   // 改过了，那一次要按新位置重新定页（见 `startPage`）
-  if (sameText && !payload.reposition) {
+  if (!(sameText && !payload.reposition)) {
+    rebuild();
+    gotoPage(startPage());
+    // 窗口刚打开 / 刚换章：读者停在这一屏就算进度。延迟一点报，
+    // 免得刚弹出还没看就被记成「读到这儿」—— 真读起来后的那次翻页会把它盖掉
+    ready = true;
+    scheduleSave(SHOW_DELAY_MS);
+  } else {
     rebuild();
     pageIndex.value = Math.min(keepPage, pages.value - 1);
     applyPage();
-    return;
   }
-  rebuild();
-  gotoPage(startPage());
-  // 窗口刚打开 / 刚换章：读者停在这一屏就算进度。延迟一点报，
-  // 免得刚弹出还没看就被记成「读到这儿」—— 真读起来后的那次翻页会把它盖掉
-  ready = true;
-  scheduleSave(SHOW_DELAY_MS);
+  // 「这一份收到了」要等重排完再说：主窗口收到回执就认为样式已经落地，
+  // 早报一步，读者看到的还是旧的
+  await reportStyleApplied(tick);
 }
 
 /** PgUp / PgDn：本章内翻一屏，翻到本章头尾就换到相邻一章 */
@@ -667,13 +675,42 @@ async function persistSize() {
   );
 }
 
+/**
+ * 把配置抹到界面上。**同步**的：颜色直接写进 `documentElement` 的行内样式，
+ * 不依赖下一帧的补丁，也不等任何异步调用 —— 一次握手要在这一次调用里就走完。
+ */
 function applyStyle(cfg = {}) {
   bg.value = cfg.readBg || bg.value;
-  fg.value = cfg.readFg || fg.value;
+  fg.value = cfg.readFg || cfg.readFg || fg.value;
   fontSize.value = cfg.readFontSize || fontSize.value;
   lineHeightFactor.value = cfg.readLineHeight || lineHeightFactor.value;
   // 旧配置里没有这一项（`undefined`）：按默认关掉，别让它变成真
   closeOnBlur.value = cfg.closeOnBlur === true;
+  const root = document.documentElement;
+  root.style.setProperty("--read-bg", bg.value);
+  root.style.setProperty("--read-fg", fg.value);
+}
+
+/**
+ * 从后端取一份配置抹上，并回一个「这算哪一版的回执」。
+ *
+ * 有正文在手就认正文带来的那一版（`styleTick`）；正文还没到手（冷启动
+ * 第一下）就认后端通知过的那一版（`latestTick`）—— 这时候两个号都还是 0，
+ * 可这一份配置确实就是后端在等的那一份。不回报的话，它会一直以为样式没落地。
+ */
+async function syncStyle() {
+  applyStyle(await getConfig().catch(() => ({})));
+  return styleTick.value || latestTick.value;
+}
+
+/**
+ * 回报「这一版样式已经吃下」。后端的重试就认这一句。
+ *
+ * 0 版没什么可回报的（冷启动前、没改过设置），别去刷后端。
+ */
+async function reportStyleApplied(tick) {
+  if (!(tick > 0)) return;
+  await styleApplied(tick).catch((e) => console.warn(`回报样式失败: ${e}`));
 }
 
 let stopLoad = null;
@@ -687,15 +724,16 @@ onMounted(async () => {
   stopLoad = await on("reader://load", (event) => load(event.payload));
   // 同一个快捷键的第二下是「关闭」：后端发这个事件让窗口自己收干净
   stopToggle = await on("reader://toggle", () => close());
-  // 手上没有正文时，样式改了只重读配置
+  // 手上没有正文（还没读过书）时，样式改了只重读配置、重排，顺带回执一句
   stopStyle = await on("reader://style", async (event) => {
-    styleTick.value = event.payload ?? styleTick.value;
-    applyStyle(await getConfig().catch(() => ({})));
+    latestTick.value = Math.max(latestTick.value, event.payload ?? 0);
+    const tick = await syncStyle();
     await nextTick();
     rebuild();
+    await reportStyleApplied(tick);
   });
 
-  applyStyle(await getConfig().catch(() => ({})));
+  await syncStyle();
   syncBodySize();
   // 窗口尺寸变了就按新尺寸重算分页；正文本身高度变化也会触发，rebuild 是幂等的
   observer = new ResizeObserver(() => {
@@ -709,9 +747,19 @@ onMounted(async () => {
   observer.observe(document.documentElement);
   if (textEl.value) observer.observe(textEl.value);
 
-  // 先取一次：窗口是异步起来的，后端建窗口时发的那个事件我们可能没赶上
+  // 先取一次：窗口是异步起来的，后端建窗口时发的那个事件我们可能没赶上。
+  // 拿到的那一份记着它自带的内容版本（`payload.styleTick`），照它回执
   const initial = await takePending().catch(() => null);
   if (initial) await load(initial);
+  // 开头那份配置的回执：没有正文可载时也得报一声，不然主窗口会一直
+  // 以为样式没落地，每次问都催着后端重发
+  await reportStyleApplied(latestTick.value);
+  // 补漏：正文到手之前收到过样式通知，那一次我们手上没有正文就没法重排 ——
+  // 这里问一句「有没有哪一版还没吃下」，有就据后端手上那份重发一次
+  if (await styleAcknowledged(0).catch(() => false)) {
+    const payload = await takePending().catch(() => null);
+    if (payload) await load(payload);
+  }
   // 首次装载也记一次：窗口被系统缩放（HiDPI）或用户从不拉伸时，
   // 配置里也该有真实尺寸，下次打开才不会大小跳一下
   await persistSize();

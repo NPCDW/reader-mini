@@ -348,3 +348,92 @@ test("重叠翻页：下一屏首行 = 上一屏末行（步进 = 每屏行数 -
   }
   assert.equal(ends[ends.length - 1], total, "末屏必须显示到正文末尾");
 });
+
+// ---- 样式握手：主窗口凭什么敢说「设置已应用」 ----
+//
+// 与 App.vue 的 `applyReaderStyle` 同一套状态机：交出去（refreshReaderStyle）
+// 之后只看阅读窗口的回执（style_acknowledged），回执没到就再交一次。
+
+/** 后端那一侧的样式账本 */
+function ledger() {
+  return { tick: 0, applied: null };
+}
+/** 阅读窗口回报「吃下了」 */
+const ack = (l, tick) => {
+  l.applied = tick;
+};
+/** 主窗口问「这一版认了没有」；tick = 0 是问「有没有哪一版还欠着」 */
+const acknowledged = (l, tick) =>
+  tick > 0 ? l.applied === tick : l.tick > 0 && l.applied !== l.tick;
+
+/** 重试到顶就认输：不拿「命令发出去了」冒充「生效了」 */
+async function handshake(l, tick, deliver, tries = 3) {
+  const attempt = async (left) => {
+    deliver(tick);
+    if (acknowledged(l, tick)) return true;
+    if (left <= 1 || tick !== l.tick) return false;
+    return attempt(left - 1);
+  };
+  return attempt(tries);
+}
+
+test("样式握手：回执到了才算生效", async () => {
+  const l = ledger();
+  l.tick = 1;
+  let delivered = 0;
+  const ok = await handshake(l, 1, (t) => {
+    delivered += 1;
+    ack(l, t);
+  });
+  assert.equal(ok, true);
+  assert.equal(delivered, 1, "一次就吃下，不该多刷");
+});
+
+test("样式握手：第一次没赶上，再交一次手就追上", async () => {
+  const l = ledger();
+  l.tick = 1;
+  let n = 0;
+  const ok = await handshake(l, 1, () => {
+    n += 1;
+    if (n >= 2) ack(l, 1);
+  });
+  assert.equal(ok, true);
+  assert.equal(n, 2);
+});
+
+test("样式握手：窗口一直不回话就如实回报没生效，不硬说已应用", async () => {
+  const l = ledger();
+  l.tick = 1;
+  let n = 0;
+  const ok = await handshake(l, 1, () => {
+    n += 1;
+  });
+  assert.equal(ok, false);
+  assert.equal(n, 3, "重试次数到顶就停，别无限刷窗口");
+});
+
+test("样式握手：冷启动的窗口用后端通知过的版本号回执", () => {
+  const l = ledger();
+  l.tick = 3;
+  // 阅读窗口那边 styleTick = 0、latestTick = 3，回执要报 3 而不是 0
+  ack(l, 0 || 3);
+  assert.equal(acknowledged(l, 3), true);
+});
+
+test("样式握手：样式通知早于正文时，窗口补问一句就知道自己欠着", () => {
+  const l = ledger();
+  l.tick = 5;
+  assert.equal(acknowledged(l, 0), true, "有欠账：窗口该补一次重排");
+  ack(l, 5);
+  assert.equal(acknowledged(l, 0), false, "补完就不欠了");
+});
+
+test("样式握手：中途又改过设置，只追最新那一版", async () => {
+  const l = ledger();
+  l.tick = 1;
+  const ok = await handshake(l, 1, () => {
+    l.tick = 2; // 读者手快，又按了一次保存
+  });
+  assert.equal(ok, false, "旧版本不该再追");
+  assert.equal(l.tick, 2);
+});

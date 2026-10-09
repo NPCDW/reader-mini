@@ -104,7 +104,7 @@ async function read(idx) {
       startLine: point?.startLine ?? 0,
       // 窗口本来就开着时这一下是「收起」：带上阅读窗口最近回传的正文位置，
       // 后端才不会把进度写成打开时那个位置（等于把这一路翻的几屏退回去）
-      pos: readerState.bookUrl === book.bookUrl ? readerState.pos ?? 0 : 0,
+      pos: readerState.bookUrl === book.bookUrl ? (readerState.pos ?? 0) : 0,
       styleTick: styleTick.value,
     });
     if (!shown) status.value = `已收起《${book.name}》`;
@@ -188,6 +188,31 @@ async function handleToggle(name) {
   if (name === "quit") await call("quit_app").catch(() => {});
 }
 
+/**
+ * 把新样式交给开着的阅读窗口，并盯着它回执。
+ *
+ * 「命令没报错」不等于「读者看到了新颜色」：阅读窗口可能还没起来，也可能
+ * 正好在重排。回执才是唯一的凭据 —— 没等到就隔一会儿再交一次手，
+ * 直到它亲口认下。这也顺手治了「设置保存后要重开窗口才变色」那类旧毛病。
+ */
+async function applyReaderStyle(tick) {
+  const attempt = async (left) => {
+    await refreshReaderStyle(tick).catch(() => {});
+    if (await styleAcknowledged(tick).catch(() => false)) return true;
+    // 版本号是每加一次往前走一个；中途又改过设置的话，只追最新那一版
+    if (left <= 1 || tick !== styleTick.value) return false;
+    await new Promise((r) => setTimeout(r, 250));
+    return attempt(left - 1);
+  };
+  const ok = await attempt(3);
+  if (!ok && tick === styleTick.value) {
+    // 窗口开着却怎么问都不认：把话说清楚，别拿「已应用」糊过去。
+    // 下次呼出时窗口会重新读一遍配置，所以这不是「丢了」，只是这一次没赶上
+    status.value = `设置已保存；阅读窗口还没确认生效，收起再呼出一次即可`;
+  }
+  return ok;
+}
+
 async function saveSettings(next) {
   try {
     config.value = {
@@ -195,10 +220,12 @@ async function saveSettings(next) {
       ...(await saveConfig({ ...config.value, ...next })),
     };
     // 背景色 / 字色 / 字号 / 行高改了，已经开着的阅读窗口也得换上新样式：
-    // 递增标记 + 重新呼出一次，阅读窗口收到就原地重排
+    // 递增标记 + 重新交一次手，阅读窗口收到就重读配置、原地重排、回一句回执
     styleTick.value += 1;
-    await refreshReaderStyle(styleTick.value).catch(() => {});
-    status.value = `设置已保存并已应用；快捷键已生效：${config.value.hotkey}`;
+    status.value = `设置已保存；快捷键已生效：${config.value.hotkey}`;
+    if (await applyReaderStyle(styleTick.value)) {
+      status.value = `设置已保存并已应用；快捷键已生效：${config.value.hotkey}`;
+    }
     return "";
   } catch (e) {
     const msg = String(e);

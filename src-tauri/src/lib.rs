@@ -58,6 +58,11 @@ pub struct State {
     /// 上一次认下的快捷键按下时刻。按住不放会连着报「按下」，
     /// 一次按键被算成两次，同样会关掉又打开
     hotkey_at: Mutex<Option<Instant>>,
+    /// 阅读窗口回报「这一份样式我已经吃下了」时带上来的版本。
+    ///
+    /// 后端不必去猜阅读窗口什么时候才把配置读到手，只认这个回执：
+    /// 没收到就等于还没生效，可以再交一次手。
+    applied_style: Mutex<Option<u64>>,
     toggles: Mutex<Vec<Toggle>>,
     app: Mutex<Option<AppHandle>>,
     /// 上一次上报给服务端的进度（书 `bookUrl`、章、行、位置）。
@@ -100,6 +105,24 @@ impl State {
 
     fn set_pending(&self, payload: api::ReadPayload) {
         *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(payload);
+    }
+
+    /// 阅读窗口回报「这一份样式已经吃下」时记一笔
+    fn mark_style_applied(&self, tick: u64) {
+        *self
+            .applied_style
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(tick);
+    }
+
+    /// 这一版样式阅读窗口吃下了没有
+    fn style_applied(&self, tick: u64) -> bool {
+        tick > 0
+            && *self
+                .applied_style
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                == Some(tick)
     }
 
     fn style_tick(&self) -> u64 {
@@ -361,19 +384,41 @@ async fn open_reader(
 /// 样式（背景 / 字色 / 字号 / 行高）是阅读窗口从自己那份配置里读的，
 /// 主窗口保存完不通知它，它就还按老样式显示 —— 这就是「设置不管用」。
 /// 正文本身没变，所以只是再交一次手，阅读窗口收到会重新读配置、重排。
+///
+/// 但「交出去了」不等于「吃下了」：另有一对回执命令（下面两个），
+/// 阅读窗口重排完回一句，主窗口只认这一句。没有它，主窗口手上唯一的
+/// 证据就只是「命令发出去了」——那是发信的把握，不是生效的证据。
+#[tauri::command]
+fn style_applied(state: tauri::State<'_, Arc<State>>, tick: u64) {
+    state.mark_style_applied(tick);
+}
+
+/// 样式有没有真的落到开着的阅读窗口上。
+///
+/// `tick > 0` 表示在问「这一版」；`tick == 0` 是问「还有哪版没吃下」——
+/// 冷启动的窗口就靠这一问把漏掉的正文补齐（见阅读窗口那边）。
+#[tauri::command]
+fn style_acknowledged(state: tauri::State<'_, Arc<State>>, tick: u64) -> bool {
+    if tick > 0 {
+        return state.style_applied(tick);
+    }
+    let latest = state.style_tick();
+    latest > 0 && !state.style_applied(latest)
+}
+
 #[tauri::command]
 async fn refresh_reader_style(
     app: AppHandle,
     state: tauri::State<'_, Arc<State>>,
     style_tick: u64,
 ) -> Result<(), String> {
+    state.set_style_tick(style_tick);
     let Some(win) = app.get_webview_window("reader") else {
         return Ok(());
     };
     if !win.is_visible().unwrap_or(false) {
         return Ok(());
     }
-    state.set_style_tick(style_tick);
     // 手上还留着正文就原样再交一次手，阅读窗口收到会重新读配置；
     // 没有正文（比如刚启动还没读过）就只发个通知
     match pending_payload(&state) {
@@ -493,6 +538,56 @@ async fn load_chapter(
     })
 }
 
+/// 把 win32 的「有边框」这一位关掉。
+///
+/// 无边框窗口（`decorations(false)`）本该是一块干净的矩形，但 Windows 11 会给
+/// 带 WS_THICKFRAME（可拉伸）的窗口套一层系统阴影，就是那圈边。
+/// Tauri 只给了改颜色的口子，去不掉它，所以自己把这一位清掉：
+/// 拉伸、圆角都不受影响。
+#[cfg(windows)]
+fn drop_window_effects(window: &tauri::WebviewWindow) {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::Graphics::Dwm::{DwmExtendFrameIntoClientArea, MARGINS};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_STYLE, SWP_FRAMECHANGED,
+        SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_BORDER, WS_THICKFRAME,
+    };
+    let Ok(handle) = window.hwnd() else {
+        return;
+    };
+    let hwnd = handle.0 as HWND;
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        SetWindowLongPtrW(
+            hwnd,
+            GWL_STYLE,
+            (style & !(WS_THICKFRAME as isize)) | WS_BORDER as isize,
+        );
+        // 内部边距全 0 = 「别把边框扩进客户区」，纯粹为了让下面那次
+        // SWP_FRAMECHANGED 把 DWM 的窗口框架重算一遍
+        let margins = MARGINS {
+            cxLeftWidth: 0,
+            cxRightWidth: 0,
+            cyTopHeight: 0,
+            cyBottomHeight: 0,
+        };
+        DwmExtendFrameIntoClientArea(hwnd, &margins);
+        // 改过样式位之后要让系统按新样式重算窗口框架，否则那圈边还在
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn drop_window_effects(_window: &tauri::WebviewWindow) {}
+
 /// 把一份内容交给阅读窗口：已开着就原地刷新，没有才新建。
 fn present(
     state: &Arc<State>,
@@ -528,6 +623,7 @@ fn present(
                     .background_color(parse_color(&cfg.read_bg))
                     .build()
                     .map_err(|e| e.to_string())?;
+            drop_window_effects(&win);
             win.emit("reader://load", &payload)
                 .map_err(|e| e.to_string())?;
             win.show().map_err(|e| e.to_string())?;
@@ -673,6 +769,7 @@ pub fn run() {
         style_tick: Mutex::new(0),
         reader_open: Mutex::new(false),
         hotkey_at: Mutex::new(None),
+        applied_style: Mutex::new(None),
         toggles: Mutex::new(Vec::new()),
         app: Mutex::new(None),
         last_saved: Mutex::new(None),
@@ -742,6 +839,8 @@ pub fn run() {
             set_current_book,
             save_reader_size,
             refresh_reader_style,
+            style_applied,
+            style_acknowledged,
             resume_point,
         ])
         .run(tauri::generate_context!())

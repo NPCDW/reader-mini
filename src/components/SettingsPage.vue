@@ -134,6 +134,9 @@ async function save() {
     </div>
     <p class="hint">当前生效：{{ config.hotkey }}</p>
     <p class="hint">保存后立刻作用到已打开的阅读窗口，不用把它关掉重开</p>
+    <p class="hint">
+      状态栏会说清楚生效没生效；万一阅读窗口没赶上，收起再呼出一次就一定读得到新设置
+    </p>
 
     <label class="check">
       <input v-model="form.closeOnBlur" type="checkbox" />

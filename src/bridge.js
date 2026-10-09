@@ -40,3 +40,5 @@ export const saveReaderSize = (width, height) =>
   call("save_reader_size", { width, height });
 export const refreshReaderStyle = (styleTick) =>
   call("refresh_reader_style", { styleTick });
+export const styleApplied = (tick) => call("style_applied", { tick });
+export const styleAcknowledged = (tick) => call("style_acknowledged", { tick });
