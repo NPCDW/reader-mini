@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e1e2e" />
+      <stop offset="100%" stop-color="#0f0f17" />
+    </linearGradient>
+    <linearGradient id="bookGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#6366f1" />
+    </linearGradient>
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#000000" flood-opacity="0.4" />
+    </filter>
+  </defs>
+
+  <!-- macOS 风格圆角底座 -->
+  <rect x="32" y="32" width="448" height="448" rx="100" ry="100" fill="url(#bgGrad)" stroke="rgba(255, 255, 255, 0.1)" stroke-width="4" />
+
+  <!-- 图标内容 -->
+  <g filter="url(#softShadow)">
+    <!-- 主书本外框 -->
+    <path d="M 256,170 C 280,152 320,140 360,150 L 360,330 C 320,320 280,332 256,350 C 232,332 192,320 152,330 L 152,150 C 192,140 232,152 256,170 Z" 
+          fill="none" 
+          stroke="url(#bookGrad)" 
+          stroke-width="28" 
+          stroke-linecap="round" 
+          stroke-linejoin="round" />
+
+    <!-- 中间书脊 -->
+    <line x1="256" y1="170" x2="256" y2="350" stroke="url(#bookGrad)" stroke-width="24" stroke-linecap="round" />
+
+    <!-- 右侧极简文本横线 -->
+    <line x1="285" y1="220" x2="325" y2="210" stroke="#f8fafc" stroke-width="12" stroke-linecap="round" opacity="0.9" />
+    <line x1="285" y1="260" x2="315" y2="252" stroke="#f8fafc" stroke-width="12" stroke-linecap="round" opacity="0.6" />
+  </g>
+</svg>
