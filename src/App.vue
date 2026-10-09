@@ -48,6 +48,8 @@ const DEFAULT_CONFIG = {
   hotkey: "Alt+PgDn",
   readerWidth: 460,
   readerHeight: 560,
+  // 阅读窗口失焦即收起是个容易误伤的行为（点一下别处窗口就没了），默认关掉
+  closeOnBlur: false,
 };
 
 async function bootstrap() {
@@ -323,10 +325,19 @@ onUnmounted(() => {
   height: 36px;
   border: none;
   border-radius: 6px;
-  background: #e3e6ea;
-  color: #444;
+  background: #2a2d34;
+  color: #c9cdd4;
   cursor: pointer;
   font-size: 14px;
+}
+
+.tab:hover:not(:disabled) {
+  background: #33373f;
+}
+
+.tab:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .tab.on {
@@ -344,6 +355,9 @@ onUnmounted(() => {
 
 .shelf {
   flex: 1;
+  /* flex 项默认不肯矮过内容（`min-height: auto`），不给 0 就会把外壳顶高，
+     外面那条滚动条就是它顶出来的 */
+  min-height: 0;
   overflow-y: auto;
   padding: 10px;
 }
@@ -353,8 +367,8 @@ onUnmounted(() => {
   gap: 10px;
   padding: 10px;
   margin-bottom: 8px;
-  background: #fff;
-  border: 1px solid #e0e0e0;
+  background: #212429;
+  border: 1px solid #2f333a;
   border-radius: 8px;
 }
 
@@ -367,6 +381,7 @@ onUnmounted(() => {
   margin: 0;
   font-size: 18px;
   font-weight: 600;
+  color: #e9ebee;
 }
 
 .meta,
@@ -377,15 +392,15 @@ onUnmounted(() => {
 }
 
 .meta {
-  color: #888;
+  color: #868c96;
 }
 
 .progress {
-  color: #4a6fa5;
+  color: #7ea6dd;
 }
 
 .intro {
-  color: #666;
+  color: #9aa0aa;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
@@ -414,8 +429,13 @@ button.primary {
 }
 
 button.plain {
-  background: #e3e6ea;
-  color: #333;
+  background: #2a2d34;
+  color: #c9cdd4;
+}
+
+button.primary:hover,
+button.plain:hover {
+  filter: brightness(1.15);
 }
 
 .toc-head {
@@ -439,26 +459,26 @@ button.plain {
 .toc li {
   padding: 9px 10px;
   margin-bottom: 4px;
-  background: #fff;
+  background: #212429;
   border-radius: 6px;
   cursor: pointer;
 }
 
 .toc li:hover {
-  background: #eef2f8;
+  background: #2b3037;
 }
 
 .empty {
   text-align: center;
-  color: #999;
+  color: #767c86;
 }
 
 .status {
   height: 26px;
   line-height: 26px;
   padding: 0 10px;
-  color: #4a6fa5;
+  color: #7ea6dd;
   font-size: 12px;
-  border-top: 1px solid #e3e6ea;
+  border-top: 1px solid #2f333a;
 }
 </style>

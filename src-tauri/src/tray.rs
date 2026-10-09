@@ -1,64 +1,18 @@
 //! 系统托盘：主窗口关掉后程序仍留在后台。
 //!
-//! 图标由代码画（一个圆角「书」），不额外带图片资源。
+//! 图标直接用应用图标（窗口默认图标，来自 `tauri.conf.json` 的 `bundle.icon`），
+//! 不另外画、也不多带图片资源。
 //! 桌面没有托盘宿主时建不出图标，程序退回老行为：关掉主窗口即退出。
 
 use std::sync::Arc;
 
 use tauri::{
-    image::Image,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager,
 };
 
 use crate::{State, Toggle};
-
-const SIZE: u32 = 32;
-
-/// 画一个书本样式的托盘图标（RGBA，交给 Tauri 转成平台图像）
-fn icon() -> Image<'static> {
-    let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
-    let r = 6i32;
-    let n = SIZE as i32;
-    for y in 0..n {
-        for x in 0..n {
-            // 圆角遮罩：角落落在四分之一圆以外就透明
-            let dx = if x < r {
-                r - x
-            } else if x > n - 1 - r {
-                x - (n - 1 - r)
-            } else {
-                0
-            };
-            let dy = if y < r {
-                r - y
-            } else if y > n - 1 - r {
-                y - (n - 1 - r)
-            } else {
-                0
-            };
-            let i = ((y * n + x) * 4) as usize;
-            if dx * dx + dy * dy > r * r {
-                continue;
-            }
-            let px = if (8..26).contains(&x) && (6..26).contains(&y) {
-                // 书页：白底 + 三条「文字」线
-                if (10..12).contains(&y) || (15..17).contains(&y) || (20..22).contains(&y) {
-                    [0x4a, 0x6f, 0xa5, 0xff]
-                } else {
-                    [0xf5, 0xf5, 0xf7, 0xff]
-                }
-            } else if x < 6 {
-                [0x2f, 0x4d, 0x7a, 0xff] // 书脊
-            } else {
-                [0x4a, 0x6f, 0xa5, 0xff] // 封面
-            };
-            rgba[i..i + 4].copy_from_slice(&px);
-        }
-    }
-    Image::new_owned(rgba, SIZE, SIZE)
-}
 
 pub fn setup(app: &AppHandle, state: Arc<State>) {
     let items = (|| -> tauri::Result<_> {
@@ -74,8 +28,8 @@ pub fn setup(app: &AppHandle, state: Arc<State>) {
     };
 
     let s = state.clone();
-    let builder = TrayIconBuilder::with_id("main")
-        .icon(icon())
+    // 托盘图标 = 应用图标。取不到（配置里没给图标）就只建菜单，托盘照旧可用
+    let mut builder = TrayIconBuilder::with_id("main")
         .tooltip("reader-mini")
         .menu(&menu)
         .show_menu_on_left_click(true)
@@ -105,6 +59,13 @@ pub fn setup(app: &AppHandle, state: Arc<State>) {
                 }
             }
         });
+
+    if let Some(icon) = app.default_window_icon() {
+        // 应用图标是彩色的，别让 macOS 当模板图（模板图会被强制成单色）
+        builder = builder.icon(icon.clone()).icon_as_template(false);
+    } else {
+        eprintln!("没有应用图标，托盘将使用系统默认图标");
+    }
 
     if let Err(e) = builder.build(app) {
         eprintln!("系统托盘不可用，关闭主窗口将直接退出: {e}");

@@ -1,4 +1,4 @@
-//! 配置：baseUrl、阅读样式、快捷键、阅读窗口尺寸。
+//! 配置：baseUrl、阅读样式、快捷键、阅读窗口尺寸、失焦是否自动收起。
 //!
 //! 落在系统配置目录（`~/.config/reader-mini/config.json`，Windows 在 `%APPDATA%`），
 //! 不进仓库、不进安装包。
@@ -18,6 +18,8 @@ pub struct Config {
     pub hotkey: String,
     pub reader_width: f32,
     pub reader_height: f32,
+    /// 阅读窗口失去焦点时自动收起。默认关：点一下别处窗口就没了，容易误伤读者
+    pub close_on_blur: bool,
 }
 
 impl Default for Config {
@@ -31,6 +33,7 @@ impl Default for Config {
             hotkey: "Alt+PgDn".into(),
             reader_width: 460.0,
             reader_height: 560.0,
+            close_on_blur: false,
         }
     }
 }

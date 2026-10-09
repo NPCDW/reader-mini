@@ -17,6 +17,7 @@ const DEFAULTS = {
   readFontSize: 20,
   readLineHeight: 1.5,
   hotkey: "Alt+PgDn",
+  closeOnBlur: false,
 };
 
 const form = reactive({ ...DEFAULTS });
@@ -34,6 +35,8 @@ watch(
     form.readFontSize = c.readFontSize ?? DEFAULTS.readFontSize;
     form.readLineHeight = c.readLineHeight ?? DEFAULTS.readLineHeight;
     form.hotkey = c.hotkey || DEFAULTS.hotkey;
+    // 后端可能还没有这一项（旧配置），没有就按默认关掉
+    form.closeOnBlur = c.closeOnBlur === true;
   },
   { immediate: true, deep: true },
 );
@@ -77,6 +80,7 @@ async function save() {
     readFontSize: Number(form.readFontSize) || DEFAULTS.readFontSize,
     readLineHeight: Number(form.readLineHeight) || DEFAULTS.readLineHeight,
     hotkey: form.hotkey,
+    closeOnBlur: form.closeOnBlur === true,
   });
   hotkeyError.value = message ? String(message) : "";
 }
@@ -130,6 +134,19 @@ async function save() {
     </div>
     <p class="hint">当前生效：{{ config.hotkey }}</p>
     <p class="hint">保存后立刻作用到已打开的阅读窗口，不用把它关掉重开</p>
+
+    <label class="check">
+      <input v-model="form.closeOnBlur" type="checkbox" />
+      <span>阅读窗口失去焦点后自动关闭</span>
+    </label>
+    <p class="hint">
+      默认关闭：开着它时点一下别处窗口就没了。不选的话只按
+      <code>Esc</code> / 右上角 ✕ / 同一个全局快捷键收起
+    </p>
+    <p class="hint">
+      拖拽、拉伸窗口不会触发关闭 —— 焦点回来或松手之后才算真的切走
+    </p>
+
     <p v-if="hotkeyError" class="error">{{ hotkeyError }}</p>
 
     <button class="primary" @click="save">保存设置</button>
@@ -139,6 +156,8 @@ async function save() {
 <style scoped>
 .settings {
   flex: 1;
+  /* 与书架那一块同理：flex 项默认不肯矮过内容，不给 0 会把外壳顶出滚动条 */
+  min-height: 0;
   overflow-y: auto;
   padding: 16px;
   display: flex;
@@ -150,7 +169,7 @@ async function save() {
 .field,
 .field-label {
   width: 100%;
-  color: #333;
+  color: #c9cdd4;
 }
 
 .field {
@@ -175,8 +194,8 @@ input {
   padding: 0 8px;
   font: inherit;
   color: inherit;
-  background: #fff;
-  border: 1px solid #c8ced8;
+  background: #212429;
+  border: 1px solid #3a3f47;
   border-radius: 6px;
   outline: none;
 }
@@ -185,18 +204,50 @@ input:focus {
   border-color: #4a6fa5;
 }
 
+/* 勾选项不吃上面那条「输入框撑满一行」的规则 */
+input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  margin: 0;
+  accent-color: #4a6fa5;
+  cursor: pointer;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  color: #c9cdd4;
+  cursor: pointer;
+}
+
+.check code {
+  padding: 0 4px;
+  background: #2a2d34;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
 .capture,
 .plain,
 .primary {
   height: 38px;
-  border: 1px solid #c8ced8;
+  border: 1px solid #3a3f47;
   border-radius: 6px;
-  background: #fff;
-  color: #333;
+  background: #212429;
+  color: #c9cdd4;
   font: inherit;
   cursor: pointer;
   text-align: left;
   padding: 0 10px;
+}
+
+.capture:hover,
+.plain:hover,
+.primary:hover {
+  filter: brightness(1.15);
 }
 
 .capture {
@@ -210,7 +261,7 @@ input:focus {
 
 .plain {
   width: 110px;
-  background: #e3e6ea;
+  background: #2a2d34;
   border-color: transparent;
   text-align: center;
 }
@@ -230,10 +281,10 @@ input:focus {
 }
 
 .hint {
-  color: #999;
+  color: #838994;
 }
 
 .error {
-  color: #c0392b;
+  color: #e0685a;
 }
 </style>

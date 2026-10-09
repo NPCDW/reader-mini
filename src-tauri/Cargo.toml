@@ -1,6 +1,6 @@
 [package]
 name = "reader-mini"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "A minimal desktop reader built with Tauri + Vue"
 rust-version = "1.77"
@@ -11,6 +11,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+regex = "1.13.1"
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }

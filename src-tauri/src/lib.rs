@@ -158,6 +158,31 @@ fn get_config(state: tauri::State<'_, Arc<State>>) -> Config {
         .clone()
 }
 
+/// 把 `#rgb` / `#rrggbb` 解析成窗口底色。
+///
+/// 阅读窗口是暗色的（默认 `#181818`），不声明底色的话窗口从无到有那一帧是白的，
+/// 每次呼出都闪一下。认不出来的写法退回到默认那档暗色。
+fn parse_color(hex: &str) -> tauri::window::Color {
+    let s = hex.trim().trim_start_matches('#');
+    let byte = |i: usize| u8::from_str_radix(s.get(i..i + 2).unwrap_or(""), 16).ok();
+    let rgb = match s.len() {
+        6 => byte(0).zip(byte(2)).zip(byte(4)),
+        3 => s
+            .chars()
+            .nth(0)
+            .and_then(|a| s.chars().nth(1).and_then(|b| s.chars().nth(2).map(|c| (a, b, c))))
+            .and_then(|(r, g, b)| {
+                let expand = |c: char| u8::from_str_radix(&format!("{c}{c}"), 16).ok();
+                expand(r).zip(expand(g)).zip(expand(b))
+            }),
+        _ => None,
+    };
+    match rgb {
+        Some(((r, g), b)) => tauri::window::Color(r, g, b, 255),
+        None => tauri::window::Color(0x18, 0x18, 0x18, 255),
+    }
+}
+
 /// 保存设置。快捷键变了顺手重新注册，保存即生效。
 #[tauri::command]
 fn save_config(
@@ -165,17 +190,24 @@ fn save_config(
     state: tauri::State<'_, Arc<State>>,
     config: Config,
 ) -> Result<Config, String> {
-    let old = {
+    let (old_hotkey, old_bg) = {
         let mut guard = state.config.lock().unwrap_or_else(|e| e.into_inner());
-        let old = guard.hotkey.clone();
+        let old = (guard.hotkey.clone(), guard.read_bg.clone());
         *guard = config.clone();
         guard.save().map_err(|e| e.to_string())?;
         old
     };
-    if hotkey::normalize(&old) == hotkey::normalize(&config.hotkey) {
+    // 阅读底色换了就把窗口底色也换掉：下次呼出（以及窗口缩放露出的那几像素）
+    // 才会是新的色，不会先白一下再变暗
+    if old_bg != config.read_bg {
+        if let Some(win) = app.get_webview_window("reader") {
+            let _ = win.set_background_color(Some(parse_color(&config.read_bg)));
+        }
+    }
+    if hotkey::normalize(&old_hotkey) == hotkey::normalize(&config.hotkey) {
         return Ok(config);
     }
-    rebind_hotkey(&app, &old, &config.hotkey).map(|_| config)
+    rebind_hotkey(&app, &old_hotkey, &config.hotkey).map(|_| config)
 }
 
 /// 换快捷键：先注册新的，成功了再注销旧的；新的失败就把旧的装回去。
@@ -450,10 +482,11 @@ fn present(
                     .inner_size(cfg.reader_width as f64, cfg.reader_height as f64)
                     .min_inner_size(260.0, 200.0)
                     .decorations(false)
-                    .always_on_top(true)
                     .skip_taskbar(true)
                     .resizable(true)
                     .visible(false)
+                    // 底色先给成阅读底色：窗口从无到有那一帧不再是一片白
+                    .background_color(parse_color(&cfg.read_bg))
                     .build()
                     .map_err(|e| e.to_string())?;
             win.emit("reader://load", &payload)

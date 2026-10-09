@@ -1,7 +1,9 @@
 :root {
   font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
   font-size: 14px;
-  color: #222;
+  color: #d6d9de;
+  /* 主窗口是暗色：声明了它，原生滚动条、表单控件这些不由 CSS 管的部分也会跟着暗下来 */
+  color-scheme: dark;
 }
 
 * {
@@ -13,10 +15,41 @@ body,
 #app {
   margin: 0;
   height: 100%;
+  /* 主窗口只有书架 / 设置那一块需要滚。这里不拦住的话，内容正好占满一屏时
+     也会多出一条外层滚动条 —— 缩放取整出来的那一个像素也算溢出，
+     书架一多就变成「外层一条 + 书架一条」两条 */
+  overflow: hidden;
 }
 
 body {
-  background: #f5f5f7;
+  background: #17181c;
   -webkit-user-select: none;
   user-select: none;
+}
+
+/* 滚动条跟着暗色走：默认的亮灰条在暗底上是一条白边 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #4a4e57 transparent;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #4a4e57;
+  border: 2px solid transparent;
+  border-radius: 6px;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #5d626d;
+  background-clip: content-box;
 }

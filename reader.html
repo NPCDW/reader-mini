@@ -4,6 +4,16 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>reader-mini-reader</title>
+    <style>
+      /* 与 Config::default() 的 read_bg 一致。阅读底色是配置里读的，要等 JS 起来
+         才写得上；这一条先顶住首帧，窗口才不会先白一下再暗下来 */
+      html,
+      body {
+        margin: 0;
+        background: #181818;
+        color-scheme: dark;
+      }
+    </style>
   </head>
   <body class="reader-body">
     <div id="reader"></div>

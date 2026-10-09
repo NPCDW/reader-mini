@@ -27,8 +27,19 @@ const SIDE_PAD = 18;
 const TOP_GAP = 6;
 /** 整章最多认多少行；超过就当量坏了，退回估行 */
 const MAX_ROWS_PER_CHAPTER = 2000;
-/** 收起时全局快捷键可能还在按住，这段时间里不接受失焦自动收起 */
+/** 收起时全局快捷键可能还在按住，这段时间里不接受失焦自动收起（仅配置项打开时才走） */
 const CLOSE_GUARD_MS = 600;
+/**
+ * 失焦后先缓这么久再收：Windows 上拉伸窗口一定会发一次失焦、拖拽也常发，
+ * 焦点随即又回来（Linux 上没有这种抖动）。立刻收的话读者伸手去拉窗口，窗口就没了。
+ */
+const BLUR_CLOSE_DELAY_MS = 400;
+/** 鼠标还按着、或窗口尺寸刚变过，都算「正在摆弄窗口」，这期间的失焦不作数 */
+const INTERACT_GRACE_MS = 800;
+/** 鼠标按下的状态靠鼠标事件维持；太久没再来事件（比如在窗口外松的手）就别再当真 */
+const BUTTON_HELD_MAX_MS = 1500;
+/** 拿鼠标按下状态要听的这几个事件；捕获阶段挂，免得被别的处理拦掉 */
+const MOUSE_TYPES = ["mousedown", "mousemove", "mouseup"];
 /**
  * 翻页上报进度的节流：连着翻好几屏也只报最后停住的那一屏。
  *
@@ -43,6 +54,8 @@ const bg = ref("#181818");
 const fg = ref("#bdbdbd");
 const fontSize = ref(20);
 const lineHeightFactor = ref(1.5);
+/** 失焦即收起。这是配置项，默认关 —— 点一下别处窗口就没了太容易误伤 */
+const closeOnBlur = ref(false);
 
 const title = ref("");
 const text = ref("");
@@ -426,9 +439,37 @@ async function step(direction) {
   }
 }
 
-/** 正在拖动窗口：这时失焦是拖拽过程的一部分，不该把窗口关掉 */
+/** 鼠标按下的键位掩码（事件上的 `buttons`），0 表示没按 */
+let heldButtons = 0;
+/** 上一次看见「有键按着」的时刻 */
+let heldAt = 0;
+/** 上一次窗口尺寸真的变了的时刻 */
+let resizedAt = 0;
+
+/** 鼠标事件上带着按下键的位掩码，顺手记一笔 —— 比自己数 mousedown / mouseup 稳：
+ *  在窗口外松手收不到 mouseup，但接下来总会有 mousemove 把状态带回来 */
+function noteButtons(event) {
+  if (typeof event?.buttons !== "number") return;
+  heldButtons = event.buttons;
+  if (event.buttons) heldAt = performance.now();
+}
+
+/** 尺寸变了就记一笔：拉伸窗口的那几秒里，系统发的失焦不能当真 */
+function onWindowResize() {
+  resizedAt = performance.now();
+}
+
+/**
+ * 正在摆弄窗口：这时失焦是拖拽 / 拉伸过程的一部分，不该把窗口关掉。
+ *
+ * Windows 上拉伸窗口一定会发一次失焦、拖拽也常发，只看失焦会把读者的窗口收没，
+ * 所以「还按着鼠标」「尺寸刚变过」「正在拖标题条」都算进去。
+ */
 function interacting() {
-  return dragging.value;
+  const now = performance.now();
+  if (dragging.value) return true;
+  if (heldButtons && now - heldAt < BUTTON_HELD_MAX_MS) return true;
+  return now - resizedAt < INTERACT_GRACE_MS;
 }
 
 /**
@@ -484,11 +525,60 @@ async function doClose() {
   }
 }
 
-/** 有些窗口管理器在隐藏窗口之后再补一次失焦；这时不能把它当成读者主动关闭 */
+/** 待执行的失焦收起 */
+let blurTimer = null;
+
+function cancelBlurClose() {
+  if (blurTimer) clearTimeout(blurTimer);
+  blurTimer = null;
+}
+
+/** 焦点回来了：刚才那次失焦是拖拽 / 拉伸抖出来的，不收 */
+function onFocus() {
+  cancelBlurClose();
+}
+
+/** 到点了再看一眼：还在摆弄窗口就再缓一轮，等松手、尺寸稳下来才真收 */
+function checkBlurClose() {
+  blurTimer = null;
+  // 焦点已经回来了（没派发 focus 事件的情形）也算数
+  if (document.hasFocus()) return;
+  if (interacting()) {
+    blurTimer = setTimeout(checkBlurClose, BLUR_CLOSE_DELAY_MS);
+    return;
+  }
+  close();
+}
+
+/**
+ * 失焦收起。
+ *
+ * 有些窗口管理器在隐藏窗口之后再补一次失焦，这时不能当成读者主动关闭；
+ * 拖拽 / 拉伸窗口时系统也会发一次失焦，所以不立刻收，先缓一缓：
+ * 焦点回来了就取消，到点还在摆弄窗口就继续等。
+ */
 function blurClose() {
   if (performance.now() - closedAt < CLOSE_GUARD_MS) return;
-  return close();
+  if (blurTimer) return;
+  blurTimer = setTimeout(checkBlurClose, BLUR_CLOSE_DELAY_MS);
 }
+
+// 失焦收起是配置项，开关可能中途被改（设置页保存后阅读窗口会重读配置），
+// 所以跟着 `closeOnBlur` 挂 / 摘监听，而不是只在装载时挂一次
+watch(
+  closeOnBlur,
+  (on) => {
+    if (on) {
+      window.addEventListener("blur", blurClose);
+      window.addEventListener("focus", onFocus);
+    } else {
+      cancelBlurClose();
+      window.removeEventListener("blur", blurClose);
+      window.removeEventListener("focus", onFocus);
+    }
+  },
+  { immediate: true },
+);
 
 async function onKeydown(event) {
   // 带修饰键的组合（默认 Alt+PgDn 就是那个呼出 / 收起的全局快捷键）不在这里动：
@@ -518,6 +608,8 @@ let dragOrigin = null;
 
 async function onDragStart(event) {
   if (event.button !== 0) return;
+  // 先记上「正在拖」：问窗口位置是异步的，那一下的失焦可能比回答先到
+  dragging.value = true;
   const win = getCurrentWindow();
   const [pos, scale] = await Promise.all([
     win.outerPosition(),
@@ -528,11 +620,13 @@ async function onDragStart(event) {
     pos: { x: pos.x, y: pos.y },
     scale,
   };
-  dragging.value = true;
 }
 
 async function onDragMove(event) {
   if (!dragOrigin) return;
+  // 在窗口外松手收不到 mouseup，等指针回来时顺手把拖动收了 ——
+  // 不然 `dragging` 一直挂着，之后就再也不会失焦自动收起了
+  if (!event.buttons) return onDragEnd();
   const { pointer, pos, scale } = dragOrigin;
   const win = getCurrentWindow();
   await win.setPosition({
@@ -578,6 +672,8 @@ function applyStyle(cfg = {}) {
   fg.value = cfg.readFg || fg.value;
   fontSize.value = cfg.readFontSize || fontSize.value;
   lineHeightFactor.value = cfg.readLineHeight || lineHeightFactor.value;
+  // 旧配置里没有这一项（`undefined`）：按默认关掉，别让它变成真
+  closeOnBlur.value = cfg.closeOnBlur === true;
 }
 
 let stopLoad = null;
@@ -620,8 +716,11 @@ onMounted(async () => {
   // 配置里也该有真实尺寸，下次打开才不会大小跳一下
   await persistSize();
   window.addEventListener("keydown", onKeydown);
-  window.addEventListener("blur", blurClose);
   window.addEventListener("mouseup", onDragEnd);
+  window.addEventListener("resize", onWindowResize);
+  for (const type of MOUSE_TYPES) {
+    window.addEventListener(type, noteButtons, { capture: true });
+  }
 });
 
 onUnmounted(() => {
@@ -629,9 +728,15 @@ onUnmounted(() => {
   stopToggle?.();
   stopStyle?.();
   observer?.disconnect();
+  cancelBlurClose();
   window.removeEventListener("keydown", onKeydown);
   window.removeEventListener("blur", blurClose);
+  window.removeEventListener("focus", onFocus);
   window.removeEventListener("mouseup", onDragEnd);
+  window.removeEventListener("resize", onWindowResize);
+  for (const type of MOUSE_TYPES) {
+    window.removeEventListener(type, noteButtons, { capture: true });
+  }
   if (resizeTimer) clearTimeout(resizeTimer);
   if (saveTimer) clearTimeout(saveTimer);
 });

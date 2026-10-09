@@ -4,6 +4,16 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>reader-mini</title>
+    <style>
+      /* 窗口底色在 tauri.conf.json 里给了，这里再写一遍是给首帧兜底：
+         Vue 挂载、样式表到位之前页面是空的，没有这一条会先闪一下白 */
+      html,
+      body {
+        margin: 0;
+        background: #17181c;
+        color-scheme: dark;
+      }
+    </style>
   </head>
   <body>
     <div id="app"></div>
