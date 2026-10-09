@@ -521,6 +521,10 @@ fn present(
                     .inner_size(cfg.reader_width as f64, cfg.reader_height as f64)
                     .min_inner_size(260.0, 200.0)
                     .decorations(false)
+                    // Windows 上无边框窗口默认是带投影的：tao 会为它留出一圈透明内边距
+                    // （Win11 还顺带圆角），阅读窗口贴着屏幕看就是糊了一圈灰边。关掉投影，
+                    // 窗口尺寸也才是「要多大就多大」，不用再减那圈内边距
+                    .shadow(false)
                     .skip_taskbar(true)
                     .resizable(true)
                     .visible(false)

@@ -745,6 +745,19 @@ onUnmounted(() => {
 watch([fontSize, lineHeightFactor], () => {
   nextTick(() => rebuild());
 });
+
+// 背景色 / 字色：写到根元素上，`.reader-body`（body）与 `.frame` 都照这两个变量取色。
+// 不写在组件里的 style 上：body 那一层也用同一组变量，只挂在 .frame 上的话
+// 窗口拉伸露出来的那几像素还是老颜色
+watch(
+  [bg, fg],
+  () => {
+    const root = document.documentElement;
+    root.style.setProperty("--read-bg", bg.value);
+    root.style.setProperty("--read-fg", fg.value);
+  },
+  { immediate: true },
+);
 </script>
 
 <template>
