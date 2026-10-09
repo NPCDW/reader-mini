@@ -122,33 +122,61 @@ export function lineHeightOf(probe, rows = 10) {
 }
 
 /**
- * 逐段量出每一行顶边的 y 坐标（相对正文顶部）。
+ * 逐段量出排版结果：每个显示行顶边的 y，以及它落在正文的第几个字。
  *
  * 逐段量：把探针里前 k 段一起量一次高度，相邻两次的差除以行高就是第 k 段
  * 占了几行，段内每行按行高等距铺开（中文单栏排版里段内行高是均匀的）。
+ *
+ * 字数按下述方式摊到段内的每一行：段里除末行外每行字数一样，
+ * 所以「段长 ÷ 这一段占几行」就是每行字数。这个数只用来记进度、恢复续读点，
+ * 差几个字不影响读者接上刚才那段。
  *
  * 为什么不用「整章总高度 ÷ 行高」反推行数：那个数字带一点零头，
  * 凑整后多出来的那一行会在屏幕下沿被切成半行字。
  *
  * 量不出高度（探针返回 0 或整章只有一行）返回 `null`，调用方退回估行。
  */
-export function measureLines(probe, text, lineHeightValue, maxRows = 2000) {
+export function measureRows(probe, text, lineHeightValue, maxRows = 2000) {
   const segs = text.split("\n");
   if (!segs.length || !(lineHeightValue > 0)) return null;
   // 整章量不出高度，说明探针拿不到排版结果（没有字体、还没挂上 DOM 等）
   const whole = measureHeight(probe, text);
   if (!(whole > 0)) return null;
 
-  const offsets = [];
+  const segRows = [];
   let rows = 0;
   let prev = measureHeight(probe, "");
   for (let k = 0; k < segs.length; k += 1) {
     const h = measureHeight(probe, segs.slice(0, k + 1).join("\n"));
-    rows += Math.max(Math.round((h - prev) / lineHeightValue), 1);
+    const n = Math.max(Math.round((h - prev) / lineHeightValue), 1);
+    segRows.push(n);
+    rows += n;
     if (rows > maxRows) return null;
     prev = h;
   }
-  for (let i = 0; i < rows; i += 1) offsets.push(i * lineHeightValue);
+
+  const offsets = [];
+  const rowChars = [];
+  // 每段开头在正文里的字数下标：前面每段的长度 + 那个换行符
+  let head = 0;
+  for (let k = 0; k < segs.length; k += 1) {
+    const len = segs[k].length;
+    const per = Math.max(Math.ceil(len / segRows[k]), 1);
+    for (let j = 0; j < segRows[k]; j += 1) {
+      offsets.push(offsets.length * lineHeightValue);
+      rowChars.push(head + Math.min(j * per, len));
+    }
+    head += len + 1;
+  }
   if (offsets.length < 2) return null;
-  return offsets;
+  return { offsets, rowChars };
+}
+
+/**
+ * 只要行位置（`measureRows` 的半份结果）时用这个。
+ *
+ * `offsets` 与 `rowChars` 一一对应：同一个显示行的「顶边 y」与「第几个字」。
+ */
+export function measureLines(probe, text, lineHeightValue, maxRows = 2000) {
+  return measureRows(probe, text, lineHeightValue, maxRows)?.offsets ?? null;
 }

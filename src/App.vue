@@ -26,10 +26,17 @@ const config = ref(null);
 /** 设置保存后递增，让已开着的阅读窗口重新读一遍样式 */
 const styleTick = ref(0);
 /** 阅读窗口最近一次回传的位置，收起 / 退出时用它把进度收干净 */
-const readerState = reactive({ chapterIndex: 0, title: "", line: 0, pos: 0 });
+const readerState = reactive({
+  bookIndex: -1,
+  chapterIndex: 0,
+  title: "",
+  line: 0,
+  pos: 0,
+});
 let pollTimer = null;
 let stopTick = null;
 let stopPos = null;
+let stopClosed = null;
 
 // 与 Rust 侧 Config::default() 同一套默认值
 const DEFAULT_CONFIG = {
@@ -52,15 +59,21 @@ async function bootstrap() {
   await refresh();
 }
 
-async function refresh() {
+/**
+ * 拉一次书架。
+ *
+ * `quiet` 是收起阅读窗口后自动刷的那一次：它不写状态栏 —— 那是后台刷新，
+ * 读者要看到的还是「已收起《…》」，不是「书架已更新」。
+ */
+async function refresh(quiet = false) {
   loading.value = true;
   try {
     const list = await getBookshelf();
     books.value = list;
     await cacheBooks(list);
-    status.value = "书架已更新";
+    if (!quiet) status.value = "书架已更新";
   } catch (e) {
-    status.value = `获取书架失败: ${e}`;
+    if (!quiet) status.value = `获取书架失败: ${e}`;
   } finally {
     loading.value = false;
   }
@@ -85,6 +98,9 @@ async function read(idx) {
       chapterIndex,
       chapterTitle: title,
       startLine: point?.startLine ?? 0,
+      // 窗口本来就开着时这一下是「收起」：带上阅读窗口最近回传的正文位置，
+      // 后端才不会把进度写成打开时那个位置（等于把这一路翻的几屏退回去）
+      pos: readerState.bookIndex === idx ? readerState.pos ?? 0 : 0,
       styleTick: styleTick.value,
     });
     if (!shown) status.value = `已收起《${book.name}》`;
@@ -112,6 +128,8 @@ async function openChapter(chapterIndex) {
       chapterIndex,
       chapterTitle: title,
       startLine: 0,
+      // 从目录进是整章从头读，正文位置从 0 起算
+      pos: 0,
       styleTick: styleTick.value,
     });
   } catch (e) {
@@ -202,11 +220,17 @@ onMounted(async () => {
   stopPos = await on("reader://position", (event) => {
     Object.assign(readerState, event.payload ?? {});
   });
+  // 阅读窗口收起、后端把进度写进服务端之后才发这个：这时拉一次书架，
+  // 书架上「读至第几章」才是刚读到的那一章
+  stopClosed = await on("reader://closed", () => {
+    refresh(true);
+  });
 });
 
 onUnmounted(() => {
   stopTick?.();
   stopPos?.();
+  stopClosed?.();
   if (pollTimer) clearInterval(pollTimer);
 });
 </script>
@@ -224,7 +248,7 @@ onUnmounted(() => {
         设置
       </button>
       <span class="spacer" />
-      <button class="tab ghost" :disabled="loading" @click="refresh">
+      <button class="tab ghost" :disabled="loading" @click="refresh()">
         {{ loading ? "加载中…" : "刷新" }}
       </button>
     </header>

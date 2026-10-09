@@ -255,6 +255,7 @@ async fn open_reader(
     chapter_index: i64,
     chapter_title: String,
     start_line: usize,
+    pos: i64,
     style_tick: u64,
 ) -> Result<bool, String> {
     state.set_style_tick(style_tick);
@@ -263,11 +264,14 @@ async fn open_reader(
         if state.reader_open() {
             let _ = win.hide();
             state.set_reader_open(false);
-            let pos = pending_payload(&state)
-                .map(|p| p.dur_chapter_pos)
-                .unwrap_or(0);
-            let _ =
-                save_reading_progress(&state, chapter_index, &chapter_title, start_line, pos).await;
+            // `pos` 是阅读窗口回传的当前那一屏的字数位置。不能用交到窗口手上时
+            // 那个位置：那是打开时的，报回去等于把这一路翻的几屏全退回去
+            if save_reading_progress(&state, chapter_index, &chapter_title, start_line, pos)
+                .await
+                .is_ok()
+            {
+                let _ = app.emit("reader://closed", ());
+            }
             return Ok(false);
         }
     }
@@ -305,6 +309,9 @@ async fn refresh_reader_style(
         Some(payload) => {
             let payload = api::ReadPayload {
                 style_tick,
+                // 只是换样式：正文还是这一章，读者正看着的那一页要留住，
+                // 不能按服务端记的位置把他挪走
+                reposition: false,
                 ..payload
             };
             state.set_pending(payload.clone());
@@ -392,8 +399,9 @@ async fn load_chapter(
         let book = books.get(book_index).cloned().ok_or("书架上找不到这本书")?;
         (cfg.base_url.clone(), book)
     };
-    // 正文位置只在换章时才变（同一章里翻页不动它），所以载入时就把书架上那个值带上，
-    // 之后每次回写原样送回去 —— 免得用 0 把别的客户端记下的位置冲掉
+    // 正文位置以字数计（本章第一屏是 0，翻到第 N 屏就是前 N-1 屏那几个字）。
+    // 载入时把书架上那个值带上，阅读窗口据此定位到上次读的那一屏，
+    // 之后按读者真正停下的那一屏回写；换章时归零 —— 新章从头读起
     let dur_chapter_pos = if chapter_index == book.dur_chapter_index {
         book.dur_chapter_pos
     } else {
@@ -409,6 +417,7 @@ async fn load_chapter(
         start_line,
         dur_chapter_pos,
         style_tick: 0,
+        reposition: true,
         text,
     })
 }
@@ -460,7 +469,8 @@ fn present(
 /// 进度上报：本地记下读到哪一行，服务端记下读到哪一章 / 哪个位置。
 ///
 /// 翻页、阅读窗口自己收起、快捷键收起、托盘退出，都要走这一份，所以抽出来。
-/// `pos` 是正文位置：同一章里翻页不动它，换章时给 0（从头读起）。
+/// `pos` 是正在阅读的正文位置，以字数计：本章第一屏是 0，翻到第 N 屏
+/// 就是前 N-1 屏那几个字；换章时给 0（从头读起）。
 async fn save_reading_progress(
     state: &Arc<State>,
     chapter_index: i64,
@@ -554,7 +564,11 @@ async fn close_reader(
         }
         state.set_reader_open(false);
     }
-    save_reading_progress(&state, chapter_index, &chapter_title, line, pos).await
+    save_reading_progress(&state, chapter_index, &chapter_title, line, pos).await?;
+    // 进度落到服务端之后才通知主窗口刷新书架：书架上「读至第几章」要跟着变成
+    // 刚读到的那一章。这一下没写成功就别刷新 —— 刷回来的是一份旧进度
+    let _ = app.emit("reader://closed", ());
+    Ok(())
 }
 
 /// 续读点：服务端说读哪一章，本地说读到哪一行

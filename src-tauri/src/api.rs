@@ -53,13 +53,20 @@ pub struct ReadPayload {
     pub chapter_title: String,
     /// 起始行；`usize::MAX` 表示「从末尾读起」（往回翻章时用）
     pub start_line: usize,
-    /// 上次读到的正文位置（`book.durChapterPos`），只有换章时才跟着变
+    /// 上次读到的正文位置（`book.durChapterPos`），以字数计：
+    /// 本章第一屏是 0，第一屏 20 个字则第二屏是 20。换章时为 0（新章从头读起）
     #[serde(default)]
     pub dur_chapter_pos: i64,
     /// 样式版本。改了背景 / 字色 / 字号 / 行高之后，就算正文没变，
     /// 也要让已经开着的阅读窗口重新读一次配置
     #[serde(default)]
     pub style_tick: u64,
+    /// 这次是不是「打开 / 换章」：是的话阅读窗口要按 `dur_chapter_pos` 重新定位
+    /// 到第几页 —— 哪怕手上这份正文跟刚才那份一模一样（同一本同一章再点一次「阅读」，
+    /// 服务端记的位置可能已经被别的客户端改过了）。
+    /// 只重刷样式时是 `false`：那一次要把读者留在他正在看的那一页
+    #[serde(default)]
+    pub reposition: bool,
     pub text: String,
 }
 
