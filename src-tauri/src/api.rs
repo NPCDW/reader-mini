@@ -83,11 +83,26 @@ struct ProgressBody<'a> {
     dur_chapter_title: &'a str,
 }
 
+/// 请求头里报的门面：`reader-mini/<版本>`，和 `Cargo.toml` / `tauri.conf.json` 里那个版本同一个数
+pub const USER_AGENT: &str = concat!("reader-mini/", env!("CARGO_PKG_VERSION"));
+
+/// 全项目唯一的 HTTP 客户端。
+///
+/// 接口一共四个，但客户端只建这一个：连接池复用是一回事，更要紧的是
+/// `User-Agent` 这种「每个请求都得带上」的东西只在这里设一次，
+/// 以后谁新加接口都不会漏。
 pub fn client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .unwrap_or_default()
+    use std::sync::OnceLock;
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .user_agent(USER_AGENT)
+                .build()
+                .unwrap_or_default()
+        })
+        .clone()
 }
 
 /// 手写百分号编码：只为两个查询串，不值得为它引 reqwest 的 `query` feature
@@ -232,5 +247,47 @@ mod tests {
     #[test]
     fn base_url_trailing_slash_is_tolerated() {
         assert_eq!(join("http://a/", "/b"), "http://a/b");
+    }
+
+    /// 请求上带的 `User-Agent` 是「发出去」那一刻由客户端补的，
+    /// 从 `RequestBuilder` 上看不到，所以只能真发一次、看落到线上的那句。
+    #[test]
+    fn every_request_reports_itself_as_reader_mini() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let n = sock.read(&mut buf).unwrap();
+            let _ = sock
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+            String::from_utf8_lossy(&buf[..n]).to_string()
+        });
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let _ = client()
+                .get(format!("http://{addr}/getBookshelf"))
+                .send()
+                .await
+                .unwrap();
+        });
+        let raw = server.join().unwrap();
+        let ua = raw
+            .lines()
+            .find(|l| l.to_ascii_lowercase().starts_with("user-agent:"))
+            .unwrap_or_else(|| panic!("请求没带 User-Agent: {raw}"));
+        let ua = ua.trim().split_once(":").unwrap().1.trim();
+        assert_eq!(ua, USER_AGENT);
+        assert_eq!(
+            USER_AGENT,
+            format!("reader-mini/{}", env!("CARGO_PKG_VERSION"))
+        );
     }
 }
