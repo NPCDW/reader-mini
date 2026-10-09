@@ -22,6 +22,7 @@ pub struct Record {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Resume {
+    pub book_url: String,
     pub chapter_index: i64,
     pub chapter_title: String,
     pub start_line: usize,
@@ -73,6 +74,7 @@ pub fn recall(book_url: &str) -> Option<Record> {
 pub fn resume(book_url: &str, server_index: i64, server_title: &str) -> Resume {
     match recall(book_url) {
         Some(rec) if server_index < 0 || rec.chapter_index == server_index => Resume {
+            book_url: book_url.to_string(),
             chapter_index: rec.chapter_index,
             chapter_title: if rec.chapter_title.is_empty() {
                 server_title.to_string()
@@ -82,6 +84,7 @@ pub fn resume(book_url: &str, server_index: i64, server_title: &str) -> Resume {
             start_line: rec.page,
         },
         _ => Resume {
+            book_url: book_url.to_string(),
             chapter_index: server_index.max(0),
             chapter_title: server_title.to_string(),
             start_line: 0,
@@ -102,28 +105,41 @@ fn flush() {
 mod tests {
     use super::*;
 
-    #[test]
-    fn local_line_survives_same_chapter() {
-        let r = Record {
+    fn record() -> Record {
+        Record {
             chapter_index: 5,
             chapter_title: "第五章".into(),
             page: 42,
-        };
-        let mut m = HashMap::new();
-        m.insert("u".to_string(), r);
-        let rec = m.get("u").unwrap();
+        }
+    }
+
+    /// 本地同一章的那点行号要接着用 —— 服务端不知道读到第几行
+    #[test]
+    fn local_line_survives_same_chapter() {
+        let rec = record();
         assert_eq!(rec.page, 42);
     }
 
+    /// 本地记的是第 5 章、服务端已经走到第 9 章：听服务端的，行号归零
     #[test]
     fn stale_local_record_falls_back_to_server_chapter() {
-        // 本地记的是第 5 章，服务端已经走到第 9 章：按服务端来，行号归零
-        let r = Record {
+        let stale = Resume {
+            book_url: "u".into(),
             chapter_index: 5,
             chapter_title: "第五章".into(),
-            page: 42,
+            start_line: 42,
         };
-        let same = r.chapter_index == 9;
-        assert!(!same);
+        assert_ne!(stale.chapter_index, 9);
+    }
+
+    /// 续读点必须把 `bookUrl` 带上：主窗口拿着它回去认书，
+    /// 只回章节和行号的话主窗口没法确认这是哪本书的续读点
+    #[test]
+    fn resume_reports_the_book_url() {
+        let r = resume("https://example.org/book/1.htm", 3, "第三章");
+        assert_eq!(r.book_url, "https://example.org/book/1.htm");
+        assert_eq!(r.chapter_index, 3);
+        assert_eq!(r.chapter_title, "第三章");
+        assert_eq!(r.start_line, 0);
     }
 }

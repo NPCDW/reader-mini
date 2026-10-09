@@ -26,8 +26,10 @@ export const getBookshelf = () => call("get_bookshelf");
 export const getChapterList = (bookUrl) =>
   call("get_chapter_list", { bookUrl });
 export const cacheBooks = (books) => call("cache_books", { books });
-export const setCurrentBook = (index) => call("set_current_book", { index });
-export const resumePoint = (bookIndex) => call("resume_point", { bookIndex });
+// 认书一律用 bookUrl：远端可能把书架重排过，下标传过去会串书
+export const setCurrentBook = (bookUrl) =>
+  call("set_current_book", { bookUrl });
+export const resumePoint = (bookUrl) => call("resume_point", { bookUrl });
 export const pollToggle = () => call("poll_toggle");
 export const takePending = () => call("take_pending");
 export const openReader = (args) => call("open_reader", args);
