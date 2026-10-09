@@ -6,6 +6,7 @@ import {
   getConfig,
   on,
   send,
+  saveProgress,
   saveReaderSize,
   switchChapter,
   takePending,
@@ -13,9 +14,10 @@ import {
 import {
   clipHeight,
   lineHeightOf,
-  measureLines,
+  measureRows,
   pageEnds,
   pageFirstRows,
+  pageOfRow,
   rowsPerScreen,
 } from "./paging";
 
@@ -27,6 +29,15 @@ const TOP_GAP = 6;
 const MAX_ROWS_PER_CHAPTER = 2000;
 /** 收起时全局快捷键可能还在按住，这段时间里不接受失焦自动收起 */
 const CLOSE_GUARD_MS = 600;
+/**
+ * 翻页上报进度的节流：连着翻好几屏也只报最后停住的那一屏。
+ *
+ * 5 秒是「读者停下来」的量级 —— 比这更密的上报只是在给服务端刷请求，
+ * 而读者翻页时中间那些屏本来就不算读过。真要精确，靠收起时的收尾上报。
+ */
+const SAVE_THROTTLE_MS = 5000;
+/** 窗口刚打开 / 刚换章时报一次，稍等一下 —— 免得「呼出来」被当成「读到这儿」 */
+const SHOW_DELAY_MS = 1200;
 
 const bg = ref("#181818");
 const fg = ref("#bdbdbd");
@@ -36,6 +47,10 @@ const lineHeightFactor = ref(1.5);
 const title = ref("");
 const text = ref("");
 const chapterIndex = ref(0);
+/** 当前这本书在书架里的下标，上报进度要用；-1 表示没书 */
+const bookIndex = ref(-1);
+/** 服务端记的上次读到的正文位置（以字数计）；换章时为 0 —— 新章从头读起 */
+const resumePos = ref(0);
 /** 手上这份内容对应的样式版本，用来判断「配置是不是比正文新」 */
 const styleTick = ref(0);
 /** 往回翻章时后端给 usize::MAX，表示落在本章末尾 */
@@ -62,6 +77,8 @@ const bodyHeight = ref(0);
 const lineHeight = ref(0);
 /** 每一行顶边的 y 坐标（相对正文顶部），分页的依据 */
 const offsets = ref([]);
+/** 每一行顶边落在正文的第几个字，与 `offsets` 一一对应 */
+const rowChars = ref([]);
 /** 每屏顶部所在的 y 坐标（正文坐标），长度即页数 */
 const tops = ref([0]);
 /** 每屏首行的行号，长度与 tops 相同 —— 两者是同一条分页表的两种单位 */
@@ -128,7 +145,7 @@ function applyViewport() {
 /**
  * 按当前窗口尺寸与字号重建行位置与分页表。
  *
- * 行位置由浏览器逐段量出来（`measureLines`，量不到就退回按行高估行）：
+ * 行位置由浏览器逐段量出来（`measureRows`，量不到就退回按行高估行）：
  * 「整章总高度 ÷ 行高」反推出来的行数只要多一行，屏幕下沿就会被切成半行字。
  * 每屏顶部落在量出来的行上，翻页就不会出现半行字。
  *
@@ -142,7 +159,9 @@ function rebuild(keepY = null) {
   lineHeight.value = lh > 0 ? lh : fallbackLineHeight();
   applyViewport();
 
-  offsets.value = measuredOffsets() ?? estimatedOffsets();
+  const measured = measuredRows();
+  offsets.value = measured?.offsets ?? estimatedOffsets();
+  rowChars.value = measured?.rowChars ?? estimatedRowChars(offsets.value.length);
 
   // 同一条分页表的两种单位：行号用来算百分比 / 记进度，y 用来滚到位置。
   // 位置必须落在实测出来的 y 上 —— 浏览器取整出来的行高会差一两个像素，
@@ -192,16 +211,16 @@ function probeLineHeight() {
 }
 
 /**
- * 量出每行顶边的 y。
+ * 量出每行顶边的 y，以及每行落在正文的第几个字。
  *
  * 优先逐段实测（浏览器说这一段占几行），量不出来再退回「整章高度 ÷ 行高」——
  * 后者的零头会凑出多一行，屏幕下沿就会切出半行字。
  */
-function measuredOffsets() {
+function measuredRows() {
   const el = probeEl.value;
   if (!el) return null;
   syncProbe();
-  return measureLines(el, text.value, lineHeight.value, MAX_ROWS_PER_CHAPTER);
+  return measureRows(el, text.value, lineHeight.value, MAX_ROWS_PER_CHAPTER);
 }
 
 /** 量不到逐行高度时的兜底：按行高铺满整章 */
@@ -210,6 +229,15 @@ function estimatedOffsets() {
   const h = Math.max(textEl.value?.offsetHeight ?? lh, lh);
   const n = Math.max(Math.round(h / lh), 1);
   return Array.from({ length: n }, (_, i) => i * lh);
+}
+
+/** 量不到逐行高度时的兜底：把整章字数摊到估出来的每一行 */
+function estimatedRowChars(count) {
+  const len = text.value.length;
+  const per = Math.max(Math.ceil(len / Math.max(count, 1)), 1);
+  return Array.from({ length: Math.max(count, 1) }, (_, i) =>
+    Math.min(i * per, len),
+  );
 }
 
 /** 探针调到与正文一模一样的排版：同宽、同字号、同行高 */
@@ -242,6 +270,9 @@ function gotoPage(index) {
   pageIndex.value = Math.min(Math.max(index, 0), pages.value - 1);
   applyPage();
   reportPosition();
+  // 翻页就是读者的进度：停下这一屏就把它报给服务端。节流在前头，
+  // 连着翻十屏只会发最后那一屏；真要能精确定位，靠的是收起时的收尾调用
+  if (ready) scheduleSave(SAVE_THROTTLE_MS);
 }
 
 /**
@@ -266,6 +297,17 @@ const currentLine = computed(() => {
 });
 
 /**
+ * 正在阅读的正文位置，以字数计 —— 也就是上报给服务端的 `durChapterPos`。
+ *
+ * 当前屏首行落在正文的第几个字就是它：第一屏是 0，第一屏有 20 个字，
+ * 翻到第二屏就是 20。翻页时它跟着变，上报的才是读者真正停下的地方。
+ */
+const durChapterPos = computed(() => {
+  const row = rowOfPage.value[pageIndex.value] ?? 0;
+  return rowChars.value[row] ?? 0;
+});
+
+/**
  * 把「现在读到哪」告诉主窗口。
  *
  * 托盘菜单的「退出」要先收掉阅读窗口才能把进度写回去，而那时它手上
@@ -273,16 +315,75 @@ const currentLine = computed(() => {
  */
 function reportPosition() {
   send("reader://position", {
+    bookIndex: bookIndex.value,
     chapterIndex: chapterIndex.value,
     title: title.value,
     line: currentLine.value,
+    pos: durChapterPos.value,
   }).catch(() => {});
+}
+
+/** 手上这本书读到哪了；还没拿到书（窗口刚起来）就不上报 */
+function progressArgs() {
+  if (bookIndex.value < 0 || !text.value) return null;
+  return {
+    bookIndex: bookIndex.value,
+    chapterIndex: chapterIndex.value,
+    chapterTitle: title.value,
+    line: currentLine.value,
+    pos: durChapterPos.value,
+  };
+}
+
+let saveTimer = null;
+/** 装载完成之前别上报：那时行号还是空的，报上去就是把进度抹了 */
+let ready = false;
+
+/** 攒一下再报：翻页是连续动作，报得太勤就是给服务端刷无效请求 */
+function scheduleSave(delay = SAVE_THROTTLE_MS) {
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    saveProgressNow();
+  }, delay);
+}
+
+function saveProgressNow() {
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  const args = progressArgs();
+  if (!args) return Promise.resolve();
+  return saveProgress(args).catch((e) => console.warn(`保存进度失败: ${e}`));
+}
+
+/**
+ * 这一章从哪一屏读起。
+ *
+ * 换章都是从头（第 0 屏）；其余按服务端给的那个字数（`durChapterPos`）
+ * 找到 pos 所在的那个显示行，落到它所在那一屏 —— 存的是字数而不是行号，
+ * 换字号、换窗口大小也不会对不上。每次打开（含同一章再点一次「阅读」）
+ * 都会走一遍这里，服务端的位置变了就跟着变。
+ */
+function startPage() {
+  if (pendingLastPage.value) return pages.value - 1;
+  const pos = resumePos.value;
+  if (!(pos > 0)) return 0;
+  const chars = rowChars.value;
+  // 位置落在正文之外（比如章节内容改短了）就从头读起，别把读者直接扔到末屏
+  if (!chars.length || pos > chars[chars.length - 1]) return 0;
+  // 先找 pos 落在哪个显示行：顶部不超过 pos 的最后一行（不是第一行不早于它的，
+  // 那会是下一行的开头，边界上要多跳一屏）。再把它映射到那一屏
+  return pageOfRow(rowOfPage.value, pageOfRow(chars, pos));
 }
 
 async function load(payload) {
   if (!payload) return;
+  bookIndex.value = payload.bookIndex ?? -1;
   chapterIndex.value = payload.chapterIndex ?? 0;
   title.value = payload.chapterTitle || "";
+  resumePos.value = payload.durChapterPos ?? 0;
   const keepPage = pageIndex.value;
   const sameText = styleTick.value > 0 && payload.styleTick === styleTick.value;
   text.value = payload.text || "";
@@ -292,15 +393,21 @@ async function load(payload) {
   // 每次展示都重新读一遍配置：设置页改完样式会重新交一次手，这里就是生效的地方
   applyStyle(await getConfig().catch(() => ({})));
   await nextTick();
-  if (sameText) {
-    // 只是重刷样式（正文没换）：留在原来那一屏，别把读者踢回页首
+  // 只是重刷样式（正文没换，也不是要重新打开）：留在原来那一屏，别把读者踢回页首。
+  // 同一本同一章再点一次「阅读」也算重新打开 —— 服务端记的位置可能已经在别处
+  // 改过了，那一次要按新位置重新定页（见 `startPage`）
+  if (sameText && !payload.reposition) {
     rebuild();
     pageIndex.value = Math.min(keepPage, pages.value - 1);
     applyPage();
     return;
   }
   rebuild();
-  gotoPage(pendingLastPage.value ? pages.value - 1 : 0);
+  gotoPage(startPage());
+  // 窗口刚打开 / 刚换章：读者停在这一屏就算进度。延迟一点报，
+  // 免得刚弹出还没看就被记成「读到这儿」—— 真读起来后的那次翻页会把它盖掉
+  ready = true;
+  scheduleSave(SHOW_DELAY_MS);
 }
 
 /** PgUp / PgDn：本章内翻一屏，翻到本章头尾就换到相邻一章 */
@@ -347,15 +454,29 @@ async function close() {
   return closing;
 }
 
-/** 真正收起：成功返回 true */
+/**
+ * 真正收起：成功返回 true。
+ *
+ * 收起前先把手上这屏的进度同步过去（`hide: false`）—— 翻页上报是节流的，
+ * 读者可能刚翻两屏就按 Esc，最后那两屏还在攒着没发。等服务端收下了再叫它把窗口藏了
+ * （`hide: true`）：反过来的话「藏」是同步的、写进度是异步的，可能还没写完就被托盘退出带走。
+ * 正在拖窗口时不上报也不收：拖拽过程中要经过失焦。
+ */
 async function doClose() {
   if (interacting()) return false;
+  const args = progressArgs();
+  const payload = {
+    chapterIndex: args?.chapterIndex ?? chapterIndex.value,
+    chapterTitle: args?.chapterTitle ?? title.value,
+    line: args?.line ?? currentLine.value,
+    pos: durChapterPos.value,
+  };
   try {
-    await closeReader({
-      chapterIndex: chapterIndex.value,
-      chapterTitle: title.value,
-      line: currentLine.value,
-    });
+    // 先去重掉还在攒着的那次翻页上报（这一下会一起写掉），再同步 + 收起
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = null;
+    await closeReader({ ...payload, hide: false });
+    await closeReader({ ...payload, hide: true });
     return true;
   } catch (e) {
     console.warn(String(e));
@@ -512,6 +633,7 @@ onUnmounted(() => {
   window.removeEventListener("blur", blurClose);
   window.removeEventListener("mouseup", onDragEnd);
   if (resizeTimer) clearTimeout(resizeTimer);
+  if (saveTimer) clearTimeout(saveTimer);
 });
 
 // 字号与行高倍数直接决定行高与整章行数，变了必须重排；颜色只走 CSS 变量，不用动排版

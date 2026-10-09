@@ -3,7 +3,7 @@ GET baseUrl/getBookshelf
 传参：无
 返回：
 durChapterIndex 为正在阅读的章节索引
-durChapterPos 为正在阅读的正文位置
+durChapterPos 为正在阅读的正文位置以字数计算
 latestChapterTitle 为已经更新到的章节标题
 ```json
 {

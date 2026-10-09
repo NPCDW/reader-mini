@@ -59,6 +59,9 @@ pub struct State {
     hotkey_at: Mutex<Option<Instant>>,
     toggles: Mutex<Vec<Toggle>>,
     app: Mutex<Option<AppHandle>>,
+    /// 上一次上报给服务端的进度（书下标、章、行、位置）。
+    /// 翻页攒出来的重复上报在这里被挡掉，不必真发一次请求
+    last_saved: Mutex<Option<(usize, i64, usize, i64)>>,
 }
 
 impl State {
@@ -252,6 +255,7 @@ async fn open_reader(
     chapter_index: i64,
     chapter_title: String,
     start_line: usize,
+    pos: i64,
     style_tick: u64,
 ) -> Result<bool, String> {
     state.set_style_tick(style_tick);
@@ -260,7 +264,14 @@ async fn open_reader(
         if state.reader_open() {
             let _ = win.hide();
             state.set_reader_open(false);
-            let _ = save_reading_progress(&state, chapter_index, &chapter_title, start_line).await;
+            // `pos` 是阅读窗口回传的当前那一屏的字数位置。不能用交到窗口手上时
+            // 那个位置：那是打开时的，报回去等于把这一路翻的几屏全退回去
+            if save_reading_progress(&state, chapter_index, &chapter_title, start_line, pos)
+                .await
+                .is_ok()
+            {
+                let _ = app.emit("reader://closed", ());
+            }
             return Ok(false);
         }
     }
@@ -298,6 +309,9 @@ async fn refresh_reader_style(
         Some(payload) => {
             let payload = api::ReadPayload {
                 style_tick,
+                // 只是换样式：正文还是这一章，读者正看着的那一页要留住，
+                // 不能按服务端记的位置把他挪走
+                reposition: false,
                 ..payload
             };
             state.set_pending(payload.clone());
@@ -385,6 +399,14 @@ async fn load_chapter(
         let book = books.get(book_index).cloned().ok_or("书架上找不到这本书")?;
         (cfg.base_url.clone(), book)
     };
+    // 正文位置以字数计（本章第一屏是 0，翻到第 N 屏就是前 N-1 屏那几个字）。
+    // 载入时把书架上那个值带上，阅读窗口据此定位到上次读的那一屏，
+    // 之后按读者真正停下的那一屏回写；换章时归零 —— 新章从头读起
+    let dur_chapter_pos = if chapter_index == book.dur_chapter_index {
+        book.dur_chapter_pos
+    } else {
+        0
+    };
     let text = api::get_book_content(&base, &book.book_url, chapter_index)
         .await
         .map_err(|e| e.to_string())?;
@@ -393,7 +415,9 @@ async fn load_chapter(
         chapter_index,
         chapter_title,
         start_line,
+        dur_chapter_pos,
         style_tick: 0,
+        reposition: true,
         text,
     })
 }
@@ -442,14 +466,17 @@ fn present(
     }
 }
 
-/// 进度收尾：本地记下读到哪一行，服务端记下读到哪一章。
+/// 进度上报：本地记下读到哪一行，服务端记下读到哪一章 / 哪个位置。
 ///
-/// 阅读窗口自己收起、快捷键收起、托盘退出，三处都要，所以抽出来一份。
+/// 翻页、阅读窗口自己收起、快捷键收起、托盘退出，都要走这一份，所以抽出来。
+/// `pos` 是正在阅读的正文位置，以字数计：本章第一屏是 0，翻到第 N 屏
+/// 就是前 N-1 屏那几个字；换章时给 0（从头读起）。
 async fn save_reading_progress(
     state: &Arc<State>,
     chapter_index: i64,
     chapter_title: &str,
     line: usize,
+    pos: i64,
 ) -> Result<(), String> {
     let book_index = *state.current_book.lock().unwrap_or_else(|e| e.into_inner());
     if book_index < 0 {
@@ -469,11 +496,58 @@ async fn save_reading_progress(
         chapter_title.to_string(),
         line,
     );
-    let _ = api::save_book_progress(&base, &book, chapter_index, 0, chapter_title).await;
+    let _ = api::save_book_progress(&base, &book, chapter_index, pos, chapter_title).await;
     Ok(())
 }
 
-/// 阅读窗口被关掉时收尾：同步进度到服务端 + 本地记行号。
+/// 翻页时上报进度。
+///
+/// 阅读窗口每翻一屏就调一次，所以这里只写服务端、并加一层「和上次送出去的一样就不发」的
+/// 去重：翻页的节流（多久报一次）由前端拿主意，后端只负责别把重复的请求打出去。
+/// 本地那份 `progress.json` 交给收起时的 `close_reader` 收尾，一次翻页不必落一次盘。
+#[tauri::command]
+async fn save_progress(
+    state: tauri::State<'_, Arc<State>>,
+    book_index: usize,
+    chapter_index: i64,
+    chapter_title: String,
+    line: usize,
+    pos: i64,
+) -> Result<(), String> {
+    {
+        let mut last = state.last_saved.lock().unwrap_or_else(|e| e.into_inner());
+        let same = last.as_ref().is_some_and(|p| {
+            p.0 == book_index && p.1 == chapter_index && p.2 == line && p.3 == pos
+        });
+        if same {
+            return Ok(());
+        }
+        *last = Some((book_index, chapter_index, line, pos));
+    }
+    let (base, book) = {
+        let cfg = state.config.lock().unwrap_or_else(|e| e.into_inner());
+        let books = state.books.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(book) = books.get(book_index).cloned() else {
+            return Err("书架上找不到这本书".into());
+        };
+        (cfg.base_url.clone(), book)
+    };
+    api::save_book_progress(&base, &book, chapter_index, pos, &chapter_title)
+        .await
+        .map_err(|e| e.to_string())?;
+    // 服务端收下了就顺手记进本地：万一这次没走正常收起（进程被杀），
+    // 下次打开也还接得上刚才翻到的地方
+    progress::remember(&book.book_url, chapter_index, chapter_title, line);
+    Ok(())
+}
+
+/// 阅读窗口发来的进度收尾。
+///
+/// 两种情形走的是同一个命令：
+/// - `hide: true` —— 窗口真的要收起（Esc、点关闭、失焦、快捷键第二下），
+///   先把窗口藏了；
+/// - `hide: false` —— 只是收起前的最后一次同步：窗口还开着，收不收由窗口自己决定
+///   （比如失焦那一瞬间鼠标还按在窗口上拖着，这次就不该收）。
 #[tauri::command]
 async fn close_reader(
     app: AppHandle,
@@ -481,12 +555,20 @@ async fn close_reader(
     chapter_index: i64,
     chapter_title: String,
     line: usize,
+    pos: i64,
+    hide: bool,
 ) -> Result<(), String> {
-    if let Some(win) = app.get_webview_window("reader") {
-        let _ = win.hide();
+    if hide {
+        if let Some(win) = app.get_webview_window("reader") {
+            let _ = win.hide();
+        }
+        state.set_reader_open(false);
     }
-    state.set_reader_open(false);
-    save_reading_progress(&state, chapter_index, &chapter_title, line).await
+    save_reading_progress(&state, chapter_index, &chapter_title, line, pos).await?;
+    // 进度落到服务端之后才通知主窗口刷新书架：书架上「读至第几章」要跟着变成
+    // 刚读到的那一章。这一下没写成功就别刷新 —— 刷回来的是一份旧进度
+    let _ = app.emit("reader://closed", ());
+    Ok(())
 }
 
 /// 续读点：服务端说读哪一章，本地说读到哪一行
@@ -516,6 +598,7 @@ pub fn run() {
         hotkey_at: Mutex::new(None),
         toggles: Mutex::new(Vec::new()),
         app: Mutex::new(None),
+        last_saved: Mutex::new(None),
     });
 
     tauri::Builder::default()
@@ -577,6 +660,7 @@ pub fn run() {
             open_reader,
             switch_chapter,
             close_reader,
+            save_progress,
             cache_books,
             set_current_book,
             save_reader_size,

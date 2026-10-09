@@ -7,6 +7,7 @@ import {
   lineHeight,
   lineHeightOf,
   measureLines,
+  measureRows,
   pageEnds,
   pageFirstRows,
   pageOfRow,
@@ -177,6 +178,31 @@ test("逐段量行：段落高度差 ÷ 行高就是这一段几行", () => {
     measureLines(probe, "a".repeat(25) + "\nbbbbb\ncccccccccc", 20),
     [0, 20, 40, 60, 80],
   );
+});
+
+test("字数位置：每屏顶边落在正文的第几个字", () => {
+  const probe = fakeProbe(20, 10);
+  // 20 字 = 2 行：第一屏是 0，第二屏就是第一屏那 10 个字
+  assert.deepEqual(measureRows(probe, "a".repeat(20), 20).rowChars, [0, 10]);
+  // 第二段开头的字数要算上段尾那个换行符：20 + 1 = 21
+  assert.deepEqual(
+    measureRows(probe, "a".repeat(20) + "\nbbbb", 20).rowChars,
+    [0, 10, 21],
+  );
+  // 空段照旧占一行、照旧吃掉那个换行符：位置只往前走
+  assert.deepEqual(measureRows(probe, "aaaa\n\nbbbb", 20).rowChars, [0, 5, 6]);
+});
+
+test("字数位置：与行位置一一对应，量不出来一起交回 null", () => {
+  const probe = fakeProbe(20, 10);
+  const { offsets, rowChars } = measureRows(probe, "a".repeat(20), 20);
+  assert.equal(offsets.length, rowChars.length);
+  const zero = {
+    textContent: "",
+    getBoundingClientRect: () => ({ height: 0 }),
+  };
+  assert.equal(measureRows(zero, "正文", 20), null);
+  assert.equal(measureRows(probe, "正文", 0), null);
 });
 
 test("逐段量行：量不出来就交回 null，让调用方估", () => {
