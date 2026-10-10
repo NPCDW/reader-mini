@@ -12,6 +12,7 @@ import {
   pageFirstRows,
   pageOfRow,
   rowsPerScreen,
+  tailPad,
 } from "./paging.js";
 
 /**
@@ -264,7 +265,7 @@ test("页与页之间不重叠不漏行：每屏首行 = 上一屏末行的下�
     [200, 17],
     [25, 16],
   ]) {
-    const firsts = pageFirstRows(total, rows, total - rows);
+    const firsts = pageFirstRows(total, rows);
     const ends = pageEnds(total, firsts, rows);
     // 首行连续
     for (let i = 1; i < firsts.length; i += 1) {
@@ -285,55 +286,60 @@ test("页与页之间不重叠不漏行：每屏首行 = 上一屏末行的下�
   }
 });
 
-test("末屏跟着正文末尾走：不硬凑一个装不满又滚不到的短屏", () => {
-  // 80 行 / 一屏 12 行：网格会排到 72，但滚到底最多站到 68 行。
-  // 末屏直接站到 68，68~79 一屏收尾；60~67 由 60 那屏（显示 60~71）接住，
-  // 两屏之间不会漏行
-  assert.deepEqual(pageFirstRows(80, 12, 68), [0, 12, 24, 36, 48, 60, 68]);
+test("末屏照样站在网格上：行数不够的那些行留给留白补齐", () => {
+  // 80 行 / 一屏 12 行：末屏从 72 起（上一屏末行），只剩 8 行不是满屏；
+  // 缺的 4 行由调用方在正文末尾垫出来（`tailPad`），不该把末屏挪去别处
+  assert.deepEqual(pageFirstRows(80, 12), [0, 12, 24, 36, 48, 60, 72]);
   assert.deepEqual(
-    pageEnds(80, pageFirstRows(80, 12, 68), 12),
-    [12, 24, 36, 48, 60, 68, 80],
+    pageEnds(80, pageFirstRows(80, 12), 12),
+    [12, 24, 36, 48, 60, 72, 80],
   );
-  // 72 滚得到，末屏就落在网格上，正文正好收尾
-  assert.deepEqual(pageFirstRows(80, 12, 72), [0, 12, 24, 36, 48, 60, 72]);
-  // 正文正好是一屏行数的整数倍时，末屏就落在网格上，不多不少
-  assert.deepEqual(pageFirstRows(84, 12, 72), [0, 12, 24, 36, 48, 60, 72]);
+  // 正文末尾只剩一行也要单独成一屏：它的首行还是上一屏的末行
+  assert.deepEqual(pageFirstRows(73, 12), [0, 12, 24, 36, 48, 60, 72]);
+  assert.deepEqual(pageEnds(73, pageFirstRows(73, 12), 12)[6], 73);
+  // 正文正好铺满若干屏时，末屏落在网格上，不多不少
+  assert.deepEqual(pageFirstRows(84, 12), [0, 12, 24, 36, 48, 60, 72]);
   assert.deepEqual(
-    pageEnds(84, pageFirstRows(84, 12, 72), 12),
+    pageEnds(84, pageFirstRows(84, 12), 12),
     [12, 24, 36, 48, 60, 72, 84],
   );
 });
 
-test("末屏站在滚动极限行上：上一屏与末屏之间不漏行", () => {
-  // 100 行 / 一屏 16 行：网格末屏 96 滚不到（极限 70），末屏站到 70；
-  // 64 那屏显示 64~79，接住 70 之前的行
-  assert.deepEqual(pageFirstRows(100, 16, 70), [0, 16, 32, 48, 64, 70]);
-  assert.deepEqual(
-    pageEnds(100, pageFirstRows(100, 16, 70), 16),
-    [16, 32, 48, 64, 70, 100],
+test("留白：末屏滚得到才算站得稳", () => {
+  const lh = 30;
+  const perPage = 16;
+  const viewport = perPage * lh; // 480
+  const stride = perPage - 1;
+  // 43 行、末屏首行 30：位置 900，内容高 1290 —— 不垫只能滚到 810，
+  // 垫 90（正好 3 个空行）之后 900 才滚得到
+  const firsts = pageFirstRows(43, stride);
+  const lastTop = firsts[firsts.length - 1] * lh;
+  const content = 43 * lh;
+  const pad = tailPad(content, viewport, lastTop);
+  assert.equal(pad, 90);
+  assert.ok(
+    content + pad - viewport >= lastTop,
+    "垫完之后末屏顶部必须滚得到",
   );
-  // 84 也滚不到 96，末屏站到 84
-  assert.deepEqual(pageFirstRows(100, 16, 84), [0, 16, 32, 48, 64, 80, 84]);
-
-  // 90 行 / 一屏 16 行：网格末屏 80 滚不到（极限 74），末屏站到 74
-  assert.deepEqual(pageFirstRows(90, 16, 74), [0, 16, 32, 48, 64, 74]);
-  assert.deepEqual(
-    pageEnds(90, pageFirstRows(90, 16, 74), 16),
-    [16, 32, 48, 64, 74, 90],
-  );
+  // 差半个像素也要垫够 —— 少垫就会被夹回去
+  assert.equal(tailPad(1290, viewport, 900.5), 91);
+  // 内容已经够高（后面还有得滚）就不用垫
+  assert.equal(tailPad(2000, viewport, 900), 0);
+  // 整章装得下一屏时没得可滚，也不用垫（容器量到的内容高度就是可视高度）
+  assert.equal(tailPad(viewport, viewport, 0), 0);
+  assert.equal(tailPad(150, viewport, 0), 0);
 });
 
 test("重叠翻页：下一屏首行 = 上一屏末行（步进 = 每屏行数 - 1）", () => {
   // 一屏 16 行、步进 15 行：第二屏从第 15 行起，正是第一屏看得见的最后一行，
-  // 且同样贴着视口上沿。正文 43 行、滚动极限 27 行（43 - 16）
+  // 且同样贴着视口上沿。正文 43 行，末屏只剩 13 行（不够一屏）
   const perPage = 16;
   const stride = perPage - 1;
   const total = 43;
-  const bottomRow = total - perPage;
-  const firsts = pageFirstRows(total, stride, bottomRow);
+  const firsts = pageFirstRows(total, stride);
   const ends = pageEnds(total, firsts, perPage);
 
-  assert.deepEqual(firsts, [0, 15, 27]);
+  assert.deepEqual(firsts, [0, 15, 30]);
   assert.equal(firsts[1], perPage - 1, "第二屏首行应是第一屏的末行");
   // 每屏在 16 行的窗口里末行都完整：首行顶边贴上沿、末行底边不出下沿
   const lh = 30;

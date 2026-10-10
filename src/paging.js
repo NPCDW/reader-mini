@@ -46,17 +46,12 @@ export function clipHeight(bodyHeight, lineHeight) {
  * 前面几屏从正文开头按「一屏 `step` 行」整整推进，**只有最后一屏可以不满**：
  * 它从上一屏的末行接上，一路显示到正文末尾。
  *
- * 最后一屏站在哪儿，取决于滚不到的问题：`scrollTop` 到内容末尾就停了，
- * 最多滚到「内容高度 − 可视高度」，换算成行就是 `bottomRow`。
- * 网格末屏（最后一个整步进位置）滚不到时，末屏**直接站到 `bottomRow`**：
- * 它必然滚得到，而上一屏已经把 `bottomRow` 之前的行全部显示过，
- * 末屏从这儿起步显示到正文末尾，两屏之间不会漏行。
- * （退到「`bottomRow` 以下最后一个整步进位置」会在它与 `bottomRow`
- * 之间留下一段哪一屏也没显示过的行，所以不能那么退。）
- *
- * 传 `null` 表示不分页（内容装得下整章）。
+ * 末屏常常只剩几行，那些缺的行由调用方在正文末尾垫一段空白补出来
+ * （见 `tailPad`），让 `scrollTop` 还滚得到这一屏的位置。垫了之后任何一屏
+ * 都站在网格上，用不着为了凑屏幕下沿把末屏挪到别处 —— 挪了它的首行
+ * 就不是上一屏的末行，翻过去凭空多出好几行已经读过的字。
  */
-export function pageFirstRows(totalRows, rows, bottomRow = null) {
+export function pageFirstRows(totalRows, rows) {
   const step = Math.max(rows, 1);
   const n = Math.max(totalRows, 1);
   if (n <= step) return [0];
@@ -67,15 +62,30 @@ export function pageFirstRows(totalRows, rows, bottomRow = null) {
     firsts.push(first);
     // 本屏已经能一路显示到正文末尾，不用再排下一屏
     if (first + step >= n) break;
-    const next = first + step;
-    if (bottomRow !== null && next > Math.max(bottomRow, 0)) {
-      // 网格位置滚不到了：末屏站到滚动极限行上收尾
-      if (bottomRow > first) firsts.push(Math.max(bottomRow, 0));
-      break;
-    }
-    first = next;
+    first += step;
   }
   return firsts.length ? firsts : [0];
+}
+
+/**
+ * 正文末尾要垫多高的空白，末屏才站得稳（像素）。
+ *
+ * 末屏要从 `lastTop`（正文坐标，通常是末屏首行的顶边）起步，但 `scrollTop`
+ * 最多滚到「内容高度 − 可视高度」；末屏只剩几行时内容根本没那么高，
+ * 浏览器会把它夹回滚动上限 —— 屏顶提前好几行，第一行自然不是上一屏的末行。
+ *
+ * 把内容垫到「`lastTop` + 一整屏」这么高，这一屏就滚得到了；多出来的那段
+ * 正是本该空着的那些行，屏幕上看起来就是末屏下方留的一段空白。
+ * 内容已经够高时不用垫（返回 0）。
+ */
+export function tailPad(contentHeight, viewportHeight, lastTop) {
+  const viewport = Math.max(viewportHeight, 0);
+  // 滚动容器量出来的内容高度不会小于可视高度：正文装不满一屏时它就是可视高度，
+  // 那时根本没有东西可滚，也就不用垫
+  const content = Math.max(contentHeight, viewport);
+  // 向上取整：差半个像素也会被浏览器夹回滚动上限，屏顶往上偏一点，
+  // 上沿那条缝就够露出上一行的下半截
+  return Math.max(Math.ceil(lastTop + viewport - content), 0);
 }
 
 /** 某一屏显示到第几行（下标不含）——最后一屏会一路显示到正文末尾 */

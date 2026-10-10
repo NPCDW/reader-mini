@@ -19,6 +19,7 @@ import {
   pageFirstRows,
   pageOfRow,
   rowsPerScreen,
+  tailPad,
 } from "./paging";
 
 /** 正文左右留白，与 scoped 样式里的 .body padding 是同一个值 */
@@ -79,6 +80,12 @@ const barEl = ref(null);
 const footEl = ref(null);
 /** 正文段落，整章都在里面，高度就是整章的高度 */
 const textEl = ref(null);
+/**
+ * 正文末尾的留白，只用来把末屏该站的位置垫到滚得到（见 `applyTailPad`）。
+ * 高度由脚本直接写进 style —— 垫之前要先把它清零量一次正文自己的高度，
+ * 走响应式绑定就得等下一次渲染，那一帧拿到的还是上次的数。
+ */
+const tailEl = ref(null);
 /** 量高度用的探针，不可见 */
 const probeEl = ref(null);
 
@@ -183,36 +190,36 @@ function rebuild(keepY = null) {
   // 相邻两屏重叠一行：下一屏的第一行就是上一屏看得见的最后一行，
   // 且同样贴着视口上沿 —— 翻页时上下文不断，也不会露出上一屏的残行。
   const stride = Math.max(perPage - 1, 1);
-  rowOfPage.value = pageFirstRows(
-    offsets.value.length,
-    stride,
-    lastReachableRow(),
-  );
+  rowOfPage.value = pageFirstRows(offsets.value.length, stride);
   rowEndOfPage.value = pageEnds(offsets.value.length, rowOfPage.value, perPage);
   tops.value = rowOfPage.value.map(
     (row) => offsets.value[Math.min(row, offsets.value.length - 1)] ?? 0,
   );
   const idx = tops.value.findIndex((t) => t >= anchor - 0.5);
   pageIndex.value = idx < 0 ? tops.value.length - 1 : idx;
+  applyTailPad(tops.value[tops.value.length - 1] ?? 0);
   applyPage();
 }
 
 /**
- * 滚到底时还能当作屏顶的最下面的行。
+ * 给正文末尾垫留白，把末屏该站的位置垫到滚得到。
  *
- * `scrollTop` 到内容末尾就停了，最多滚到「整章高度 − 可视高度」。末屏从更靠下的
- * 行开始就滚不到位，会被夹回来、末行跌出视口。把这条线换算成行号交给
- * `pageFirstRows`，让它决定末屏站哪儿。
+ * 末屏和前面每屏一样，第一行得是上一屏的最后一行 —— 可它自己往往只剩几行，
+ * 剩下的位置本来就该是空白的，而空白不占内容高度：`scrollTop` 撑不到这一屏
+ * 的顶部就被浏览器夹回滚动上限，屏顶往前挪好几行，翻过去看到的第一行
+ * 就不是上一屏的最后一行了。
  *
- * 内容装得下整章（`maxScroll <= 0`）时返回 `null`：不分页，也就没有这个限制。
+ * 垫到「末屏顶部 + 一整屏」那么高（`tailPad`），位置就稳了；多出来的那段
+ * 正好落在填不满的那些空行里，屏幕上就是末屏下方的一片空白。
+ * 必须先清零量一次：带着上次的留白量到的是垫过之后的高度。
  */
-function lastReachableRow() {
+function applyTailPad(lastTop) {
   const scroller = scrollerEl.value;
-  const lh = lineHeight.value;
-  if (!scroller || !(lh > 0)) return null;
-  const maxScroll = scroller.scrollHeight - bodyHeight.value;
-  if (!(maxScroll > 0)) return null;
-  return Math.floor(maxScroll / lh);
+  const tail = tailEl.value;
+  if (!scroller || !tail) return;
+  tail.style.height = "0px";
+  const content = scroller.scrollHeight;
+  tail.style.height = `${tailPad(content, bodyHeight.value, lastTop)}px`;
 }
 
 /** 探针量出的行高（量不到返回 0） */
@@ -268,15 +275,12 @@ function syncProbe() {
  * 位置是正文 y，不是行号 —— 浏览器取整出来的行高会差那么一两个像素，
  * 按行号 × 行高去滚，滚几屏就会偏出半行。
  *
- * 末屏例外：它要显示到正文末尾，得滚到能滚的最下面，否则末尾那几行看不到。
- * `scrollTop` 会自动夹到上限，这里直接把目标设成内容末尾就好。
+ * 末屏走的是同一条路：它填不满的那些空行已经由 `applyTailPad` 垫成高度了，
+ * 这一屏滚得到，不用为了看见正文末尾额外滚到内容底部 —— 那等于把末屏往上挪。
  */
 function applyPage() {
   if (!scrollerEl.value) return;
-  const atLast = pageIndex.value >= pages.value - 1;
-  scrollerEl.value.scrollTop = atLast
-    ? scrollerEl.value.scrollHeight
-    : (tops.value[pageIndex.value] ?? 0);
+  scrollerEl.value.scrollTop = tops.value[pageIndex.value] ?? 0;
 }
 
 function gotoPage(index) {
@@ -779,6 +783,8 @@ watch(
       :style="{ '--fs': `${fontSize}px`, '--lh': lineHeightFactor }"
     >
       <p ref="textEl" class="text">{{ text }}</p>
+      <!-- 正文末尾的留白：高度由脚本垫出来，里面没有内容，不参与正文排版 -->
+      <div ref="tailEl" class="tail" aria-hidden="true" />
     </div>
 
     <footer ref="footEl" class="foot">
