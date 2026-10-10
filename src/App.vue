@@ -28,6 +28,8 @@ const chapters = ref([]);
  */
 const currentBookUrl = ref("");
 const loading = ref(false);
+/** 正在打开的书的 bookUrl：后端要先联网取正文，这一下不是抬手就有的 */
+const openingUrl = ref("");
 const status = ref("");
 
 const config = ref(null);
@@ -95,29 +97,32 @@ async function read(idx) {
   // 认书一律用 bookUrl：远端可能刚把书架重排过，这个下标指的是眼前这份列表，
   // 等它传到后端时可能已经指到别的书上了
   const book = books.value[idx];
+  if (openingUrl.value) return;
   currentBookUrl.value = book.bookUrl;
-  await setCurrentBook(book.bookUrl);
-  const point = await call("resume_point", { bookUrl: book.bookUrl }).catch(
-    () => null,
-  );
-  const chapterIndex = point?.chapterIndex ?? book.durChapterIndex ?? 0;
-  const title = point?.chapterTitle || book.durChapterTitle || book.name;
-  status.value = `正在阅读《${book.name}》`;
+  // 这几步都要走网络（问续读点、取正文），等的时候按钮上给个「加载中」
+  openingUrl.value = book.bookUrl;
+  status.value = `正在打开《${book.name}》…`;
   try {
-    // 返回 false = 窗口本来就开着，这次按键是「收起」，不再拿内容去刷它
-    const shown = await openReader({
+    await setCurrentBook(book.bookUrl);
+    const point = await call("resume_point", { bookUrl: book.bookUrl }).catch(
+      () => null,
+    );
+    const chapterIndex = point?.chapterIndex ?? book.durChapterIndex ?? 0;
+    const title = point?.chapterTitle || book.durChapterTitle || book.name;
+    // 「阅读」不是一个开关：窗口关着就打开，开着就把这本交到开着的那一个上，
+    // 不会把正在读的窗口收掉（收起是快捷键 / 托盘那一下的事，见 `handleToggle`）
+    await openReader({
       bookUrl: book.bookUrl,
       chapterIndex,
       chapterTitle: title,
       startLine: point?.startLine ?? 0,
-      // 窗口本来就开着时这一下是「收起」：带上阅读窗口最近回传的正文位置，
-      // 后端才不会把进度写成打开时那个位置（等于把这一路翻的几屏退回去）
-      pos: readerState.bookUrl === book.bookUrl ? readerState.pos ?? 0 : 0,
       styleTick: styleTick.value,
     });
-    if (!shown) status.value = `已收起《${book.name}》`;
+    status.value = `正在阅读《${book.name}》`;
   } catch (e) {
     status.value = `打开阅读窗口失败: ${e}`;
+  } finally {
+    openingUrl.value = "";
   }
 }
 
@@ -134,7 +139,9 @@ async function openChapter(chapterIndex) {
   // 目录下标就是 getBookContent 的 index，不能因为空标题重新编号
   const title = ch?.title || `第${chapterIndex + 1}章`;
   page.value = "books";
-  status.value = `正在阅读《${book.name}》`;
+  // 后端要联网取这一章的正文，等的时候目录上给个「加载中」
+  openingUrl.value = book.bookUrl;
+  status.value = `正在打开《${book.name}》…`;
   try {
     // 从目录进是按章节读，阅读窗口开着就带上新样式一起刷新
     await openReader({
@@ -142,12 +149,13 @@ async function openChapter(chapterIndex) {
       chapterIndex,
       chapterTitle: title,
       startLine: 0,
-      // 从目录进是整章从头读，正文位置从 0 起算
-      pos: 0,
       styleTick: styleTick.value,
     });
+    status.value = `正在阅读《${book.name}》`;
   } catch (e) {
     status.value = `打开阅读窗口失败: ${e}`;
+  } finally {
+    openingUrl.value = "";
   }
 }
 
@@ -287,7 +295,18 @@ onUnmounted(() => {
             <p class="intro">{{ book.intro }}</p>
           </div>
           <div class="actions">
-            <button class="primary" @click="read(i)">阅读</button>
+            <button
+              class="primary"
+              :disabled="openingUrl !== ''"
+              @click="read(i)"
+            >
+              <span
+                v-if="openingUrl === book.bookUrl"
+                class="spinner"
+                aria-hidden="true"
+              />
+              {{ openingUrl === book.bookUrl ? "加载中…" : "阅读" }}
+            </button>
             <button class="plain" @click="openToc(i)">目录</button>
           </div>
         </article>
@@ -447,9 +466,34 @@ button.plain {
   color: #c9cdd4;
 }
 
-button.primary:hover,
-button.plain:hover {
+button.primary:hover:not(:disabled),
+button.plain:hover:not(:disabled) {
   filter: brightness(1.15);
+}
+
+button.primary:disabled {
+  opacity: 0.75;
+  cursor: default;
+}
+
+/* 按钮里那个转圈：取正文要联网，等的时候让按钮自己说在忙 */
+button.primary .spinner {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  margin-right: 6px;
+  vertical-align: -1px;
+  border: 2px solid currentColor;
+  /* 留一道缺口，转起来才看得出在动 */
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .toc-head {

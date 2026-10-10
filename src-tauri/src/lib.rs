@@ -310,10 +310,12 @@ fn save_reader_size(state: tauri::State<'_, Arc<State>>, width: f32, height: f32
     let _ = cfg.save();
 }
 
-/// 打开（或原地刷新）阅读窗口。
+/// 打开阅读窗口；窗口已经开着就往开着的那一个里换内容。
 ///
-/// 呼出前会先看一眼：窗口已经开着就把这次按键当成「收起」，同步进度后藏起来，
-/// 返回 `false`，前端不再拿内容去刷它。这样呼出 / 关闭就是同一个开关。
+/// 书架上的「阅读」不是一个开关：窗口关着才新建，开着就是把这本（这一章）交到
+/// 同一个窗口上，不收起它 —— 收起是全局快捷键 / 托盘那一个开关的事
+/// （`Toggle::Close`，由主窗口直接 `close_reader`）。
+/// 换内容之前，阅读窗口会先把正在读的那一份进度写回去（见 `ReaderApp.load`）。
 #[tauri::command]
 async fn open_reader(
     app: AppHandle,
@@ -322,30 +324,13 @@ async fn open_reader(
     chapter_index: i64,
     chapter_title: String,
     start_line: usize,
-    pos: i64,
     style_tick: u64,
-) -> Result<bool, String> {
+) -> Result<(), String> {
     state.set_style_tick(style_tick);
     // 主窗口手上的下标可能已经过期（远端刚重排过书架），所以认书只认 bookUrl
     {
         let mut cur = state.current_url.lock().unwrap_or_else(|e| e.into_inner());
         *cur = book_url.clone();
-    }
-    // 第二下（快捷键 / 托盘同一个开关）：窗口开着就收起，进度照常写回。
-    if let Some(win) = app.get_webview_window("reader") {
-        if state.reader_open() {
-            let _ = win.hide();
-            state.set_reader_open(false);
-            // `pos` 是阅读窗口回传的当前那一屏的字数位置。不能用交到窗口手上时
-            // 那个位置：那是打开时的，报回去等于把这一路翻的几屏全退回去
-            if save_reading_progress(&state, chapter_index, &chapter_title, start_line, pos)
-                .await
-                .is_ok()
-            {
-                let _ = app.emit("reader://closed", ());
-            }
-            return Ok(false);
-        }
     }
     let payload = load_chapter(&state, &book_url, chapter_index, chapter_title, start_line).await?;
     let cfg = state
@@ -499,7 +484,7 @@ fn present(
     app: &AppHandle,
     cfg: &Config,
     payload: api::ReadPayload,
-) -> Result<bool, String> {
+) -> Result<(), String> {
     let payload = api::ReadPayload {
         style_tick: state.style_tick(),
         ..payload
@@ -507,12 +492,15 @@ fn present(
     state.set_pending(payload.clone());
     match app.get_webview_window("reader") {
         Some(win) => {
+            // 窗口已经开着：这一下只是换内容，别动它的开合 —— 该收起的时候
+            // 走的是 `close_reader`，不是这里
             win.emit("reader://load", &payload)
                 .map_err(|e| e.to_string())?;
+            // 藏着的窗口（被收起过）也走这一支：再叫出来并置顶
             let _ = win.show();
             let _ = win.set_focus();
             state.set_reader_open(true);
-            Ok(true)
+            Ok(())
         }
         None => {
             let win =
@@ -537,7 +525,7 @@ fn present(
             win.show().map_err(|e| e.to_string())?;
             win.set_focus().map_err(|e| e.to_string())?;
             state.set_reader_open(true);
-            Ok(false)
+            Ok(())
         }
     }
 }

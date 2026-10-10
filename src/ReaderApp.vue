@@ -50,6 +50,13 @@ const MOUSE_TYPES = ["mousedown", "mousemove", "mouseup"];
 const SAVE_THROTTLE_MS = 5000;
 /** 窗口刚打开 / 刚换章时报一次，稍等一下 —— 免得「呼出来」被当成「读到这儿」 */
 const SHOW_DELAY_MS = 1200;
+/**
+ * 「加载中」摆出来之前先缓这么一下。
+ *
+ * 本地那一下常常几十毫秒就回来了，摆出来又立刻收掉只是闪一下；
+ * 真在等（翻章要联网取下一章）才值得让读者看见。
+ */
+const LOADING_HINT_MS = 150;
 
 const bg = ref("#181818");
 const fg = ref("#bdbdbd");
@@ -72,6 +79,39 @@ const pendingLastPage = ref(false);
 
 /** 是否正在拖动标题条 */
 const dragging = ref(false);
+
+/** 正在等后端把内容交过来（刚打开、翻到相邻一章都要联网取正文） */
+const loading = ref(false);
+/** 「加载中」的延迟计时器，见 `LOADING_HINT_MS` */
+let loadingTimer = null;
+
+/**
+ * 开始等内容。
+ *
+ * 先缓 `LOADING_HINT_MS` 再摆出来：秒回的那一下摆了又收只是闪一下，
+ * 读者看见的应该是「真的在等」。
+ */
+function beginLoading() {
+  if (loadingTimer || loading.value) return;
+  loadingTimer = setTimeout(() => {
+    loadingTimer = null;
+    loading.value = true;
+  }, LOADING_HINT_MS);
+}
+
+/**
+ * 收掉「加载中」。
+ *
+ * 内容到手了要收；取内容失败（比如已经是最后一章）也得收 ——
+ * 那种情况下不会有新内容交过来，不收就一直挂在屏幕上。
+ */
+function endLoading() {
+  if (loadingTimer) {
+    clearTimeout(loadingTimer);
+    loadingTimer = null;
+  }
+  loading.value = false;
+}
 
 /** 滚动容器，可视高度会被裁到整行高的整数倍 */
 const scrollerEl = ref(null);
@@ -352,6 +392,24 @@ function progressArgs() {
   };
 }
 
+/**
+ * 换书 / 换章时，手上这份内容该补记的进度；不是换内容就返回 null。
+ *
+ * 翻页上报是节流的（见 `SAVE_THROTTLE_MS`），读者刚翻几屏就在书架点另一本，
+ * 那几屏还攒着没发；新内容一交过来，手上这份位置就没了 ——
+ * 窗口不会被收起（收起时的收尾上报也就没有），所以换之前先补一次。
+ */
+function leavingArgs(payload) {
+  if (!bookUrl.value || !text.value) return null;
+  if (
+    (payload.bookUrl ?? "") === bookUrl.value &&
+    (payload.chapterIndex ?? 0) === chapterIndex.value
+  ) {
+    return null;
+  }
+  return progressArgs();
+}
+
 let saveTimer = null;
 /** 装载完成之前别上报：那时行号还是空的，报上去就是把进度抹了 */
 let ready = false;
@@ -397,49 +455,68 @@ function startPage() {
 
 async function load(payload) {
   if (!payload) return;
-  bookUrl.value = payload.bookUrl ?? "";
-  chapterIndex.value = payload.chapterIndex ?? 0;
-  title.value = payload.chapterTitle || "";
-  resumePos.value = payload.durChapterPos ?? 0;
-  const keepPage = pageIndex.value;
-  const sameText = styleTick.value > 0 && payload.styleTick === styleTick.value;
-  text.value = payload.text || "";
-  styleTick.value = payload.styleTick ?? 0;
-  pendingLastPage.value = (payload.startLine ?? 0) > 1_000_000;
+  try {
+    // 换书 / 换章：先把正在读的这一份进度写回去再换。认书认章都按 payload 上
+    // 那份新内容比对着来 —— 同一本同一章再点一次「阅读」不算换
+    const leaving = leavingArgs(payload);
+    if (leaving) {
+      await saveProgress(leaving).catch((e) => console.warn(`保存进度失败: ${e}`));
+    }
+    bookUrl.value = payload.bookUrl ?? "";
+    chapterIndex.value = payload.chapterIndex ?? 0;
+    title.value = payload.chapterTitle || "";
+    resumePos.value = payload.durChapterPos ?? 0;
+    const keepPage = pageIndex.value;
+    const sameText =
+      styleTick.value > 0 && payload.styleTick === styleTick.value;
+    text.value = payload.text || "";
+    styleTick.value = payload.styleTick ?? 0;
+    pendingLastPage.value = (payload.startLine ?? 0) > 1_000_000;
 
-  // 每次展示都重新读一遍配置：设置页改完样式会重新交一次手，这里就是生效的地方
-  applyStyle(await getConfig().catch(() => ({})));
-  await nextTick();
-  // 只是重刷样式（正文没换，也不是要重新打开）：留在原来那一屏，别把读者踢回页首。
-  // 同一本同一章再点一次「阅读」也算重新打开 —— 服务端记的位置可能已经在别处
-  // 改过了，那一次要按新位置重新定页（见 `startPage`）
-  if (sameText && !payload.reposition) {
+    // 每次展示都重新读一遍配置：设置页改完样式会重新交一次手，这里就是生效的地方
+    applyStyle(await getConfig().catch(() => ({})));
+    await nextTick();
+    // 只是重刷样式（正文没换，也不是要重新打开）：留在原来那一屏，别把读者踢回页首。
+    // 同一本同一章再点一次「阅读」也算重新打开 —— 服务端记的位置可能已经在别处
+    // 改过了，那一次要按新位置重新定页（见 `startPage`）
+    if (sameText && !payload.reposition) {
+      rebuild();
+      pageIndex.value = Math.min(keepPage, pages.value - 1);
+      applyPage();
+      return;
+    }
     rebuild();
-    pageIndex.value = Math.min(keepPage, pages.value - 1);
-    applyPage();
-    return;
+    gotoPage(startPage());
+    // 窗口刚打开 / 刚换章：读者停在这一屏就算进度。延迟一点报，
+    // 免得刚弹出还没看就被记成「读到这儿」—— 真读起来后的那次翻页会把它盖掉
+    ready = true;
+    scheduleSave(SHOW_DELAY_MS);
+  } finally {
+    // 内容已经排到屏幕上了（或压根排不动）：不论哪种，「加载中」都该收了
+    endLoading();
   }
-  rebuild();
-  gotoPage(startPage());
-  // 窗口刚打开 / 刚换章：读者停在这一屏就算进度。延迟一点报，
-  // 免得刚弹出还没看就被记成「读到这儿」—— 真读起来后的那次翻页会把它盖掉
-  ready = true;
-  scheduleSave(SHOW_DELAY_MS);
 }
 
 /** PgUp / PgDn：本章内翻一屏，翻到本章头尾就换到相邻一章 */
 async function step(direction) {
   if (!text.value) return;
+  // 已经在等换章了：再按一下不该叠上去再取一次
+  if (loading.value) return;
   const atEnd = direction > 0 && pageIndex.value + 1 >= pages.value;
   const atStart = direction < 0 && pageIndex.value === 0;
   if (!atEnd && !atStart) {
     gotoPage(pageIndex.value + direction);
     return;
   }
+  // 换章要后端联网取相邻那一章的正文，这一下不是瞬时的：
+  // 等的时候先把「加载中」摆上，不然看着就像按了没反应
+  beginLoading();
   try {
     await switchChapter({ currentIndex: chapterIndex.value, direction });
   } catch (e) {
     console.warn(String(e));
+    // 取章失败就不会有新内容交过来（也就没有 `load` 来收），自己收掉
+    endLoading();
   }
 }
 
@@ -713,9 +790,16 @@ onMounted(async () => {
   observer.observe(document.documentElement);
   if (textEl.value) observer.observe(textEl.value);
 
-  // 先取一次：窗口是异步起来的，后端建窗口时发的那个事件我们可能没赶上
+  // 先取一次：窗口是异步起来的，后端建窗口时发的那个事件我们可能没赶上。
+  // 从窗口露出来到正文排上屏这一段是空白的，先摆上「加载中」
+  beginLoading();
   const initial = await takePending().catch(() => null);
-  if (initial) await load(initial);
+  if (initial) {
+    await load(initial); // 里面收掉「加载中」
+  } else {
+    // 手上没有内容（窗口被空呼出来）：别把「加载中」一直挂着
+    endLoading();
+  }
   // 首次装载也记一次：窗口被系统缩放（HiDPI）或用户从不拉伸时，
   // 配置里也该有真实尺寸，下次打开才不会大小跳一下
   await persistSize();
@@ -743,6 +827,7 @@ onUnmounted(() => {
   }
   if (resizeTimer) clearTimeout(resizeTimer);
   if (saveTimer) clearTimeout(saveTimer);
+  if (loadingTimer) clearTimeout(loadingTimer);
 });
 
 // 字号与行高倍数直接决定行高与整章行数，变了必须重排；颜色只走 CSS 变量，不用动排版
@@ -796,6 +881,12 @@ watch(
 
     <!-- 量高度用的探针：不可见，只为拿浏览器排版出来的真实高度 -->
     <p ref="probeEl" class="probe" aria-hidden="true" />
+
+    <!-- 取内容时的遮罩：翻章要联网取下一章，等的那一段不能看着像按了没反应 -->
+    <div v-if="loading" class="loading" role="status" aria-live="polite">
+      <span class="spinner" aria-hidden="true" />
+      <span class="hint">加载中…</span>
+    </div>
   </div>
 </template>
 
@@ -904,5 +995,45 @@ watch(
   visibility: hidden;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* 盖住整个窗口：正文还是上一章的，露着只会让人以为翻过去了 */
+.loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: var(--read-bg, #181818);
+  color: var(--read-fg, #bdbdbd);
+  font-size: 13px;
+  z-index: 2;
+}
+
+.spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid currentColor;
+  /* 留一道缺口，转起来才看得出在动 */
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation-duration: 2s;
+  }
+}
+
+.hint {
+  opacity: 0.65;
 }
 </style>

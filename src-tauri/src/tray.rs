@@ -40,8 +40,14 @@ pub fn setup(app: &AppHandle, state: Arc<State>) {
                     let _ = win.set_focus();
                 }
             }
-            // 和全局快捷键同一个开关
-            "toggle" => s.emit_toggle(Toggle::Reader),
+            // 和全局快捷键同一个开关：窗口开着这一下是「收起」
+            "toggle" => {
+                s.emit_toggle(if s.reader_open() {
+                    Toggle::Close
+                } else {
+                    Toggle::Reader
+                })
+            }
             "quit" => s.emit_toggle(Toggle::Quit),
             _ => {}
         })
