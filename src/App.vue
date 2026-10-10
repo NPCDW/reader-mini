@@ -13,12 +13,20 @@ import {
   setCurrentBook,
 } from "./bridge";
 import SettingsPage from "./components/SettingsPage.vue";
+import { continueIndex, findBook } from "./bookshelf";
 
 const tab = ref("shelf");
 const page = ref("books");
 const books = ref([]);
 const chapters = ref([]);
-const currentBook = ref(-1);
+/**
+ * 最后一本读过的书，按 `bookUrl` 记 —— 不能记下标。
+ *
+ * 书架会被远端按阅读时间重排，收起阅读窗口后又会悄悄刷一次书架，
+ * 手上那个下标早就指到别的书上去了。快捷键续读要是照下标取，
+ * 就会「打开 A、收起、打开 B」轮流出现（见 ISSUE #12）。
+ */
+const currentBookUrl = ref("");
 const loading = ref(false);
 const status = ref("");
 
@@ -84,10 +92,10 @@ async function refresh(quiet = false) {
 /** 打开某本书：带上这本书 + 上次读到的章节与行号 */
 async function read(idx) {
   if (idx < 0 || idx >= books.value.length) return;
-  currentBook.value = idx;
   // 认书一律用 bookUrl：远端可能刚把书架重排过，这个下标指的是眼前这份列表，
   // 等它传到后端时可能已经指到别的书上了
   const book = books.value[idx];
+  currentBookUrl.value = book.bookUrl;
   await setCurrentBook(book.bookUrl);
   const point = await call("resume_point", { bookUrl: book.bookUrl }).catch(
     () => null,
@@ -115,12 +123,13 @@ async function read(idx) {
 
 /** 目录里点某章：从该章正文最开始读起 */
 async function openChapter(chapterIndex) {
-  const idx = currentBook.value;
-  if (idx < 0) {
+  // 目录属于哪本书同样按 bookUrl 认：这份目录是打开时拉的，
+  // 期间书架可能已经被重排过
+  const book = findBook(books.value, currentBookUrl.value);
+  if (!book) {
     status.value = "请先从书架打开一本书的目录";
     return;
   }
-  const book = books.value[idx];
   const ch = chapters.value[chapterIndex];
   // 目录下标就是 getBookContent 的 index，不能因为空标题重新编号
   const title = ch?.title || `第${chapterIndex + 1}章`;
@@ -143,7 +152,7 @@ async function openChapter(chapterIndex) {
 }
 
 async function openToc(idx) {
-  currentBook.value = idx;
+  currentBookUrl.value = books.value[idx].bookUrl;
   await setCurrentBook(books.value[idx].bookUrl);
   page.value = "toc";
   loading.value = true;
@@ -163,7 +172,9 @@ async function continueReading() {
     status.value = "书架还没加载出来";
     return;
   }
-  await read(currentBook.value >= 0 ? currentBook.value : 0);
+  // 认书只认 bookUrl，下标只在眼前这份列表里临时算一下。
+  // 记住的下标会在书架被重排后指到别的书上 —— 那正是「两本书轮流出现」的来源
+  await read(continueIndex(books.value, currentBookUrl.value));
 }
 
 async function handleToggle(name) {
