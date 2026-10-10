@@ -6,11 +6,14 @@ import {
   getChapterList,
   cacheBooks,
   getConfig,
+  hideReader,
   on,
   openReader,
   refreshReaderStyle,
   saveConfig,
+  send,
   setCurrentBook,
+  showReader,
 } from "./bridge";
 import SettingsPage from "./components/SettingsPage.vue";
 import { continueIndex, findBook } from "./bookshelf";
@@ -175,8 +178,18 @@ async function openToc(idx) {
   }
 }
 
-/** 托盘「继续阅读」/ 全局快捷键：同一套续读规则 */
+/**
+ * 托盘「继续阅读」/ 全局快捷键：同一套续读规则。
+ *
+ * 窗口只是被收起了（收起是 `hide`，内容还在它自己那里）时直接把它叫出来：
+ * 不再走 `open_reader` —— 那一路要联网取正文（窗口得先摆「加载中」），
+ * 还会按服务端记的位置把读者挪走，而读者要的就是刚才那一屏。
+ */
 async function continueReading() {
+  if (await showReader().catch(() => false)) {
+    status.value = "已呼出阅读窗口";
+    return;
+  }
   if (!books.value.length) {
     status.value = "书架还没加载出来";
     return;
@@ -191,12 +204,16 @@ async function handleToggle(name) {
     await continueReading();
     return;
   }
-  // 「收起」与「退出」都要先把阅读窗口的进度收干净：
-  // 快捷键收起直接叫窗口自己收（它手上有准确的章节与行号），
-  // 退出时窗口可能已经没了，就用手上这份位置兜底
-  if (name === "close" || name === "quit") {
-    // 阅读窗口自己收起时会先把进度写完、再叫后端藏窗口，到这里通常已经收干净了；
-    // 这一次是兜底：窗口可能已经没了（退出前先被带走），手上这份位置就是唯一线索
+  // 收起只是把窗口藏起来：窗口手上的书、章、第几屏全都还在，再按一下就是原样。
+  // 不走 `close_reader`：那一路要联网写进度、写完再让主窗口刷一次书架，
+  // 读者按完收起还得等这一圈。翻页本来就上报过，还攒着的那一次让窗口自己发掉
+  if (name === "close") {
+    send("reader://flush").catch(() => {});
+    await hideReader().catch(() => {});
+    return;
+  }
+  // 退出要把进度收干净：这时窗口可能已经没了，手上这份位置就是唯一线索
+  if (name === "quit") {
     await call("close_reader", {
       chapterIndex: readerState.chapterIndex,
       chapterTitle: readerState.title,
@@ -204,8 +221,8 @@ async function handleToggle(name) {
       pos: readerState.pos ?? 0,
       hide: true,
     }).catch(() => {});
+    await call("quit_app").catch(() => {});
   }
-  if (name === "quit") await call("quit_app").catch(() => {});
 }
 
 async function saveSettings(next) {

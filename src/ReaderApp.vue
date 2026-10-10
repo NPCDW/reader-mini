@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   closeReader,
   getConfig,
+  hideReader,
   on,
   send,
   saveProgress,
@@ -440,6 +441,17 @@ function saveProgressNow() {
 }
 
 /**
+ * 还攒着一次翻页上报就让它发出去（不等结果）。
+ *
+ * 收起走的是「只把窗口藏起来」这条路（见 `hide`），不再有收尾上报来补这一下，
+ * 攒着的那次得自己发 —— 翻页也是读者的进度，不能因为收起快就丢了。
+ */
+function flushPendingSave() {
+  if (!saveTimer) return;
+  saveProgressNow();
+}
+
+/**
  * 这一章从哪一屏读起。
  *
  * 换章都是从头（第 0 屏）；其余按服务端给的那个字数（`durChapterPos`）
@@ -565,10 +577,10 @@ function interacting() {
 }
 
 /**
- * 收起：让主窗口把进度收干净（写回服务端 + 本地记行号），然后藏起自己。
+ * 收起这一件事的闸：`close`（真的关掉）与 `hide`（只是藏起来）共用。
  *
- * 全局快捷键按第二下、托盘「收起」都落到这里，所以加个闸：
- * 收起过程中又按了一下，不能两条路径同时去写进度。
+ * 收起过程中又来了一下（比如收起时又按了一次快捷键），不能两条路径同时收：
+ * 一次写进度、另一次把窗口藏了，顺序一乱进度就记到别处去了。
  */
 let closing = null;
 /** 刚刚收起过。收起后全局快捷键可能还按着，这段时间里不接受失焦自动收起 */
@@ -617,6 +629,40 @@ async function doClose() {
   }
 }
 
+/**
+ * 收起（快捷键 / 失焦）：只把窗口藏起来，成功返回 true。
+ *
+ * 不走 `close_reader`，所以不触发收起那一套（联网写进度、写完再让主窗口
+ * 刷一次书架）：那两下都要等网络，读者按一下快捷键 / 点一下别处，
+ * 窗口却还赖在屏幕上。窗口里的书、章、第几屏全都还在，下次呼出来就是原样。
+ *
+ * 攒着的那次翻页上报照发（不等它）—— 那几屏也是读者的进度。
+ */
+async function doHide() {
+  flushPendingSave();
+  try {
+    await hideReader();
+    return true;
+  } catch (e) {
+    console.warn(String(e));
+    return false;
+  }
+}
+
+/** 与 `close` 同一个闸：收起过程中又来一下，不能两条路同时收 */
+async function hide() {
+  if (closing) return closing;
+  closing = doHide()
+    .then((done) => {
+      if (done) closedAt = performance.now();
+      return done;
+    })
+    .finally(() => {
+      closing = null;
+    });
+  return closing;
+}
+
 /** 待执行的失焦收起 */
 let blurTimer = null;
 /** 这一轮失焦已经缓了几轮；见 `BLUR_MAX_RETRIES` */
@@ -644,7 +690,8 @@ function checkBlurClose() {
     blurTimer = setTimeout(checkBlurClose, BLUR_CLOSE_DELAY_MS);
     return;
   }
-  close();
+  // 只是先收起来：不写进度也不刷书架，抬手就该消失
+  hide();
 }
 
 /**
@@ -777,6 +824,7 @@ function applyStyle(cfg = {}) {
 let stopLoad = null;
 let stopLoading = null;
 let stopFailed = null;
+/** 快捷键收起时主窗口发来的那一下：见 `flushPendingSave` */
 let stopToggle = null;
 let stopStyle = null;
 let observer = null;
@@ -792,8 +840,9 @@ onMounted(async () => {
     endLoading();
     loadError.value = String(event.payload ?? "加载失败");
   });
-  // 同一个快捷键的第二下是「关闭」：后端发这个事件让窗口自己收干净
-  stopToggle = await on("reader://toggle", () => close());
+  // 快捷键收起那一下由后端直接藏窗口（不等轮询），这里只把还攒着的翻页上报发掉：
+  // 收起不再有收尾上报，攒着的那一次得趁窗口还在的时候发
+  stopToggle = await on("reader://flush", flushPendingSave);
   // 手上没有正文时，样式改了只重读配置
   stopStyle = await on("reader://style", async (event) => {
     styleTick.value = event.payload ?? styleTick.value;

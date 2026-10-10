@@ -75,6 +75,11 @@ pub struct State {
     /// 窗口管理器可能还把它算作可见，收起这一下就又被当成呼出，
     /// 表现就是窗口关掉以后自己又弹回来。
     reader_open: Mutex<bool>,
+    /// 阅读窗口手上有没有内容。
+    ///
+    /// 收起只是 `hide`，书、章、第几屏都还在窗口自己那里，所以再呼出来
+    /// 直接把它 show 出来就是原样 —— 用不着再取一遍正文（见 `show_reader`）。
+    reader_ready: Mutex<bool>,
     /// 上一次认下的快捷键按下时刻。按住不放会连着报「按下」，
     /// 一次按键被算成两次，同样会关掉又打开
     hotkey_at: Mutex<Option<Instant>>,
@@ -154,6 +159,15 @@ impl State {
         *self.reader_open.lock().unwrap_or_else(|e| e.into_inner()) = open;
     }
 
+    /// 阅读窗口手上有没有内容：有就可以直接把它叫出来，不必重新取正文
+    fn reader_ready(&self) -> bool {
+        *self.reader_ready.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn set_reader_ready(&self, ready: bool) {
+        *self.reader_ready.lock().unwrap_or_else(|e| e.into_inner()) = ready;
+    }
+
     /// 认下这一次快捷键按下；太密的那几次是按住不放的重复，不算。
     fn mark_hotkey(&self) -> bool {
         let mut guard = self.hotkey_at.lock().unwrap_or_else(|e| e.into_inner());
@@ -173,6 +187,8 @@ impl State {
         let payload = guard.payload.take();
         if payload.is_some() {
             guard.loading = false;
+            // 正文进了窗口：从今往后它是「有内容」的，收起再呼出可以直接 show
+            self.set_reader_ready(true);
         }
         PendingReply {
             loading: guard.loading,
@@ -573,6 +589,30 @@ fn present_window(
     Ok(win)
 }
 
+/// 快捷键 / 托盘呼出：把藏着的那一个直接叫出来，不再取一遍正文。
+///
+/// 收起只是 `hide`（见 `hide_reader`），书、章、读到的第几屏都还在窗口
+/// 自己那里，所以再按一下叫出来就该是刚才那一屏 —— 走 `open_reader`
+/// 既要联网（窗口还得先摆「加载中」），也会按服务端记的那个位置把读者挪走。
+///
+/// 手上还没有内容（从来没打开过）时返回 `false`，由前端照老路子打开。
+#[tauri::command]
+fn show_reader(app: AppHandle, state: tauri::State<'_, Arc<State>>) -> bool {
+    if !state.reader_ready() {
+        return false;
+    }
+    let Some(win) = app.get_webview_window("reader") else {
+        return false;
+    };
+    let _ = win.show();
+    let _ = win.set_focus();
+    state.set_reader_open(true);
+    // 设置可能在它藏着的时候改过（`refresh_reader_style` 只发给看得见的窗口），
+    // 叫出来时让它自己重读一次配置；正文没换，读者还留在刚才那一屏
+    let _ = win.emit("reader://style", state.style_tick());
+    true
+}
+
 /// 把一份正文交给已经在屏幕上的阅读窗口。
 ///
 /// 内容同时留在 `pending` 里：窗口刚建那一瞬间的 emit 会丢（它还没开始监听），
@@ -583,6 +623,7 @@ fn deliver(state: &Arc<State>, app: &AppHandle, payload: api::ReadPayload) {
         ..payload
     };
     state.set_pending(payload.clone());
+    state.set_reader_ready(true);
     if let Some(win) = app.get_webview_window("reader") {
         let _ = win.emit("reader://load", &payload);
     }
@@ -654,6 +695,20 @@ async fn save_progress(
     // 下次打开也还接得上刚才翻到的地方
     progress::remember(&book.book_url, chapter_index, chapter_title, line);
     Ok(())
+}
+
+/// 快捷键 / 失焦收起：只把窗口藏起来，别的都不做。
+///
+/// 这一下刻意不走 `close_reader`：那一路要联网写进度、写完再让主窗口刷一次
+/// 书架，读者按完收起还得等这一圈。藏窗口是本地那一下，抬手就该发生 ——
+/// 窗口手上的内容和读到的那一屏都还在，再呼出来就是原样（见 `show_reader`）。
+#[tauri::command]
+fn hide_reader(app: AppHandle, state: tauri::State<'_, Arc<State>>) -> bool {
+    if let Some(win) = app.get_webview_window("reader") {
+        let _ = win.hide();
+    }
+    state.set_reader_open(false);
+    true
 }
 
 /// 阅读窗口发来的收尾：先把窗口收了，进度丢到后台写。
@@ -729,6 +784,7 @@ pub fn run() {
         pending: Mutex::new(Pending::default()),
         style_tick: Mutex::new(0),
         reader_open: Mutex::new(false),
+        reader_ready: Mutex::new(false),
         hotkey_at: Mutex::new(None),
         toggles: Mutex::new(Vec::new()),
         app: Mutex::new(None),
@@ -793,6 +849,8 @@ pub fn run() {
             get_chapter_list,
             open_reader,
             switch_chapter,
+            show_reader,
+            hide_reader,
             close_reader,
             save_progress,
             cache_books,

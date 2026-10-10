@@ -33,6 +33,9 @@ export const resumePoint = (bookUrl) => call("resume_point", { bookUrl });
 export const pollToggle = () => call("poll_toggle");
 export const takePending = () => call("take_pending");
 export const openReader = (args) => call("open_reader", args);
+// 呼出 / 收起那一个开关：只是把藏着的那一个叫出来 / 藏回去，不重新取正文、不写进度
+export const showReader = () => call("show_reader");
+export const hideReader = () => call("hide_reader");
 export const switchChapter = (args) => call("switch_chapter", args);
 export const saveProgress = (args) => call("save_progress", args);
 export const closeReader = (args) => call("close_reader", args);
