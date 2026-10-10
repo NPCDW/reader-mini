@@ -378,6 +378,9 @@ fn save_reader_size(state: tauri::State<'_, Arc<State>>, width: f32, height: f32
 /// 「点阅读」到窗口露脸之间就是整段网络时间（慢的时候好几秒）。所以这里
 /// 只管把窗口摆到屏幕上（摆「加载中」），联网交给后台任务，取到再由它交过去。
 /// 换内容之前，阅读窗口会先把正在读的那一份进度写回去（见 `ReaderApp.load`）。
+///
+/// 建窗口这件事本身不在这儿当场做 —— 见 `present_window` 的说明：
+/// 这一条命令跑在 WebView2 派发的 IPC 回调里，当场建 webview 会重入卡死。
 #[tauri::command]
 fn open_reader(
     app: AppHandle,
@@ -399,15 +402,26 @@ fn open_reader(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    // 先把窗口叫出来（新建的那一个也在这时露脸），再让后台去取正文
+    // 先把「正文正在取」记下来：窗口一露脸就摆「加载中」，别让网络挡着窗口出来
     state.mark_loading();
-    let win = present_window(&state, &app, &cfg)?;
-    // 已经开着的窗口收不到「刚装载」那一次查询，用事件告诉它开始等
-    let _ = win.emit("reader://loading", ());
 
     let st = (*state).clone();
     let app2 = app.clone();
     tauri::async_runtime::spawn(async move {
+        // 先把窗口叫出来（新建的那一个也在这时露脸），再让后台去取正文。
+        // 排队到事件循环的下一次迭代，不在 IPC 回调栈里当场建（见下）
+        let st_win = st.clone();
+        let app_win = app2.clone();
+        let queued = app2.run_on_main_thread(move || {
+            if let Err(e) = present_window(&st_win, &app_win, &cfg) {
+                report_failure(&st_win, &app_win, &e);
+            }
+        });
+        if queued.is_err() {
+            report_failure(&st, &app2, "打开阅读窗口失败");
+            return;
+        }
+
         match load_chapter(&st, &book_url, chapter_index, chapter_title, start_line).await {
             Ok(payload) => deliver(&st, &app2, payload),
             Err(e) => report_failure(&st, &app2, &e),
@@ -555,6 +569,15 @@ async fn load_chapter(
 /// 只管窗口，不管内容：取正文要联网，那一下不该挡着窗口露脸 ——
 /// 内容到了由后台任务 `deliver` 交过去，这之前窗口摆「加载中」。
 /// 已经开着的窗口（含被收起的）只是再叫出来并置顶。
+///
+/// **必须在事件循环的正常迭代里跑，不能在 IPC 回调栈里当场调用。**
+///
+/// 命令是从 WebView2 派发的 `WebResourceRequested` 回调里执行的，而 WebView2
+/// 不允许在它自己的事件回调里再建 webview —— 建窗口要等它的环境创建完成，
+/// 那个完成通知又要回到这条被卡住的回调栈上，两边就这么互相等着了：
+/// 窗口永远出不来，主线程也再转不起来，连托盘「退出」都点不动。
+/// Linux 上建 webview 是同步的，不经过这一层，所以一直没出问题。
+/// 排队过去之后，窗口仍旧由 UI 线程建出来，只是晚一步（一次事件循环）。
 fn present_window(
     state: &Arc<State>,
     app: &AppHandle,
@@ -565,6 +588,9 @@ fn present_window(
         let _ = win.show();
         let _ = win.set_focus();
         state.set_reader_open(true);
+        // 已经开着的窗口不会再走一遍「装载完成、自己来取内容」，
+        // 所以用事件告诉它：新内容在路上，先摆「加载中」
+        let _ = win.emit("reader://loading", ());
         return Ok(win);
     }
     let win = WebviewWindowBuilder::new(app, "reader", WebviewUrl::App("reader.html".into()))

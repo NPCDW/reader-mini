@@ -7,6 +7,9 @@ export default defineConfig({
   plugins: [vue()],
   clearScreen: false,
   server: {
+    // Windows 下 "localhost" 可能解析到 ::1，Tauri 探测时用 127.0.0.1 会连不上，
+    // 这里显式绑定 IPv4 回环，和 tauri.conf.json 的 devUrl 保持一致
+    host: "127.0.0.1",
     port: 1420,
     strictPort: true,
   },
