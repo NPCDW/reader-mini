@@ -33,8 +33,12 @@ const CLOSE_GUARD_MS = 600;
 /**
  * 失焦后先缓这么久再收：Windows 上拉伸窗口一定会发一次失焦、拖拽也常发，
  * 焦点随即又回来（Linux 上没有这种抖动）。立刻收的话读者伸手去拉窗口，窗口就没了。
+ *
+ * 只缓这么一点：够滤掉焦点抖动就行，再长读者点了别处还得等窗口消失。
  */
-const BLUR_CLOSE_DELAY_MS = 400;
+const BLUR_CLOSE_DELAY_MS = 200;
+/** 到点了还在摆弄窗口最多再缓几轮，之后照收 —— 不然「一直拖着」就永远关不掉 */
+const BLUR_MAX_RETRIES = 2;
 /** 鼠标还按着、或窗口尺寸刚变过，都算「正在摆弄窗口」，这期间的失焦不作数 */
 const INTERACT_GRACE_MS = 800;
 /** 鼠标按下的状态靠鼠标事件维持；太久没再来事件（比如在窗口外松的手）就别再当真 */
@@ -84,6 +88,8 @@ const dragging = ref(false);
 const loading = ref(false);
 /** 「加载中」的延迟计时器，见 `LOADING_HINT_MS` */
 let loadingTimer = null;
+/** 上一次取内容失败的原因：窗口已经露脸了，总得说一声为什么是空的 */
+const loadError = ref("");
 
 /**
  * 开始等内容。
@@ -455,12 +461,16 @@ function startPage() {
 
 async function load(payload) {
   if (!payload) return;
+  // 新内容到手了：上一次失败的那句话就该撤了
+  loadError.value = "";
   try {
-    // 换书 / 换章：先把正在读的这一份进度写回去再换。认书认章都按 payload 上
-    // 那份新内容比对着来 —— 同一本同一章再点一次「阅读」不算换
+    // 换书 / 换章：正在读的这一份进度要写回去。认书认章都按 payload 上
+    // 那份新内容比对着来 —— 同一本同一章再点一次「阅读」不算换。
+    // 不 await：这一下要联网，等它回来再排新版面，新内容就跟着一起迟到了。
+    // 位置已经算出来了（`leavingArgs` 在这一刻取的值），丢到后台写不影响正确性
     const leaving = leavingArgs(payload);
     if (leaving) {
-      await saveProgress(leaving).catch((e) => console.warn(`保存进度失败: ${e}`));
+      saveProgress(leaving).catch((e) => console.warn(`保存进度失败: ${e}`));
     }
     bookUrl.value = payload.bookUrl ?? "";
     chapterIndex.value = payload.chapterIndex ?? 0;
@@ -517,6 +527,7 @@ async function step(direction) {
     console.warn(String(e));
     // 取章失败就不会有新内容交过来（也就没有 `load` 来收），自己收掉
     endLoading();
+    loadError.value = String(e);
   }
 }
 
@@ -579,13 +590,14 @@ async function close() {
 /**
  * 真正收起：成功返回 true。
  *
- * 收起前先把手上这屏的进度同步过去（`hide: false`）—— 翻页上报是节流的，
- * 读者可能刚翻两屏就按 Esc，最后那两屏还在攒着没发。等服务端收下了再叫它把窗口藏了
- * （`hide: true`）：反过来的话「藏」是同步的、写进度是异步的，可能还没写完就被托盘退出带走。
- * 正在拖窗口时不上报也不收：拖拽过程中要经过失焦。
+ * 只管「让窗口消失」这一件事，一次调用就够：后端收到 `hide: true` 当场把窗口藏了，
+ * 进度写回服务端是它自己的后台任务 —— 等那一下（要联网，慢的时候好几秒）再藏窗口，
+ * 读者按了 Esc / 点了 ✕ 还得看着窗口赖在屏幕上不动。
+ *
+ * 手上这屏的位置照旧带过去：翻页上报是节流的，读者可能刚翻两屏就按 Esc，
+ * 最后那两屏还攒着没发。写不上去最坏也只是差一屏，比窗口点不动强。
  */
 async function doClose() {
-  if (interacting()) return false;
   const args = progressArgs();
   const payload = {
     chapterIndex: args?.chapterIndex ?? chapterIndex.value,
@@ -594,10 +606,9 @@ async function doClose() {
     pos: durChapterPos.value,
   };
   try {
-    // 先去重掉还在攒着的那次翻页上报（这一下会一起写掉），再同步 + 收起
+    // 顺手去重掉还在攒着的那次翻页上报：这一下会一起写掉
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = null;
-    await closeReader({ ...payload, hide: false });
     await closeReader({ ...payload, hide: true });
     return true;
   } catch (e) {
@@ -608,6 +619,8 @@ async function doClose() {
 
 /** 待执行的失焦收起 */
 let blurTimer = null;
+/** 这一轮失焦已经缓了几轮；见 `BLUR_MAX_RETRIES` */
+let blurRetries = 0;
 
 function cancelBlurClose() {
   if (blurTimer) clearTimeout(blurTimer);
@@ -624,7 +637,10 @@ function checkBlurClose() {
   blurTimer = null;
   // 焦点已经回来了（没派发 focus 事件的情形）也算数
   if (document.hasFocus()) return;
-  if (interacting()) {
+  // 缓归缓，不能无限缓下去：鼠标按键状态可能一直没回来（在窗口外松的手），
+  // 那样窗口就永远关不掉了。缓够几轮就照收
+  if (interacting() && blurRetries < BLUR_MAX_RETRIES) {
+    blurRetries += 1;
     blurTimer = setTimeout(checkBlurClose, BLUR_CLOSE_DELAY_MS);
     return;
   }
@@ -635,12 +651,13 @@ function checkBlurClose() {
  * 失焦收起。
  *
  * 有些窗口管理器在隐藏窗口之后再补一次失焦，这时不能当成读者主动关闭；
- * 拖拽 / 拉伸窗口时系统也会发一次失焦，所以不立刻收，先缓一缓：
- * 焦点回来了就取消，到点还在摆弄窗口就继续等。
+ * 拖拽 / 拉伸窗口时系统也会发一次失焦，所以先缓一缓：
+ * 焦点回来了就取消，到点还在摆弄窗口就再缓一轮（有上限）。
  */
 function blurClose() {
   if (performance.now() - closedAt < CLOSE_GUARD_MS) return;
   if (blurTimer) return;
+  blurRetries = 0;
   blurTimer = setTimeout(checkBlurClose, BLUR_CLOSE_DELAY_MS);
 }
 
@@ -758,6 +775,8 @@ function applyStyle(cfg = {}) {
 }
 
 let stopLoad = null;
+let stopLoading = null;
+let stopFailed = null;
 let stopToggle = null;
 let stopStyle = null;
 let observer = null;
@@ -766,6 +785,13 @@ onMounted(async () => {
   // 先挂监听再取内容：全局快捷键呼出时后端发的 reader://load 就在这一瞬间，
   // 内容先拿在手上再谈排版，不然初次打开会是一片空白
   stopLoad = await on("reader://load", (event) => load(event.payload));
+  // 后端已经把窗口叫出来了、正文还在路上：摆「加载中」等着
+  stopLoading = await on("reader://loading", () => beginLoading());
+  // 正文没取到（网络不通 / 书架上没这本）：得把「加载中」收掉，不然一直转
+  stopFailed = await on("reader://failed", (event) => {
+    endLoading();
+    loadError.value = String(event.payload ?? "加载失败");
+  });
   // 同一个快捷键的第二下是「关闭」：后端发这个事件让窗口自己收干净
   stopToggle = await on("reader://toggle", () => close());
   // 手上没有正文时，样式改了只重读配置
@@ -793,9 +819,11 @@ onMounted(async () => {
   // 先取一次：窗口是异步起来的，后端建窗口时发的那个事件我们可能没赶上。
   // 从窗口露出来到正文排上屏这一段是空白的，先摆上「加载中」
   beginLoading();
-  const initial = await takePending().catch(() => null);
-  if (initial) {
-    await load(initial); // 里面收掉「加载中」
+  const pending = await takePending().catch(() => null);
+  if (pending?.payload) {
+    await load(pending.payload); // 里面收掉「加载中」
+  } else if (pending?.loading) {
+    // 正文还在路上（后端先把窗口叫出来了）：留着「加载中」，等 reader://load 把它换掉
   } else {
     // 手上没有内容（窗口被空呼出来）：别把「加载中」一直挂着
     endLoading();
@@ -813,6 +841,8 @@ onMounted(async () => {
 
 onUnmounted(() => {
   stopLoad?.();
+  stopLoading?.();
+  stopFailed?.();
   stopToggle?.();
   stopStyle?.();
   observer?.disconnect();
@@ -887,6 +917,9 @@ watch(
       <span class="spinner" aria-hidden="true" />
       <span class="hint">加载中…</span>
     </div>
+
+    <!-- 取内容失败：贴在底部说一句，不遮住已经在看的正文 -->
+    <p v-if="loadError" class="error" role="alert">{{ loadError }}</p>
   </div>
 </template>
 
@@ -1035,5 +1068,19 @@ watch(
 
 .hint {
   opacity: 0.65;
+}
+
+/* 取内容失败：浮在底部，别挡着读者已经在看的那几行 */
+.error {
+  position: absolute;
+  right: 0;
+  bottom: 30px;
+  left: 0;
+  z-index: 3;
+  margin: 0;
+  padding: 0 12px;
+  font-size: 12px;
+  text-align: center;
+  opacity: 0.7;
 }
 </style>

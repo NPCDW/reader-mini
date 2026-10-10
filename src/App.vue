@@ -47,6 +47,7 @@ let pollTimer = null;
 let stopTick = null;
 let stopPos = null;
 let stopClosed = null;
+let stopFailed = null;
 
 // 与 Rust 侧 Config::default() 同一套默认值
 const DEFAULT_CONFIG = {
@@ -249,12 +250,17 @@ onMounted(async () => {
   stopClosed = await on("reader://closed", () => {
     refresh(true);
   });
+  // 窗口是立刻叫出来的、正文在后台取：取不到由后端回头说一声，写进状态栏
+  stopFailed = await on("reader://failed", (event) => {
+    status.value = String(event.payload ?? "取正文失败");
+  });
 });
 
 onUnmounted(() => {
   stopTick?.();
   stopPos?.();
   stopClosed?.();
+  stopFailed?.();
   if (pollTimer) clearInterval(pollTimer);
 });
 </script>

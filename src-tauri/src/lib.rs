@@ -16,6 +16,7 @@ mod hotkey;
 mod progress;
 mod tray;
 
+use serde::Serialize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -36,6 +37,27 @@ pub enum Toggle {
     Quit,
 }
 
+/// 要交给阅读窗口的那一份内容。
+///
+/// 取正文要联网，而窗口必须先出来（见 `open_reader`），所以这里记的是
+/// 「东西到了没有」而不是只有结果：`loading` 为真时窗口该摆「加载中」等着。
+#[derive(Default, Clone)]
+struct Pending {
+    /// 正文还在路上：窗口先露脸，摆「加载中」等 `reader://load`
+    loading: bool,
+    /// 已经取到的正文。窗口是异步起来的，emit 可能在它开始监听之前就发完了，
+    /// 所以内容同时留在这里，窗口装载完自己取走
+    payload: Option<api::ReadPayload>,
+}
+
+/// `take_pending` 的回答：手上有没有正文，以及是不是还在取
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingReply {
+    loading: bool,
+    payload: Option<api::ReadPayload>,
+}
+
 pub struct State {
     pub config: Mutex<Config>,
     /// 书架缓存：快捷键续读与托盘「继续阅读」都要用
@@ -43,9 +65,7 @@ pub struct State {
     /// 当前在读的那本书的 `bookUrl`。跨命令认书一律用它 —— 服务端可能按阅读
     /// 时间重排书架，下标会指到别的书上。空串表示还没选过
     pub current_url: Mutex<String>,
-    /// 最近一次要展示的正文。阅读窗口是异步起来的，事件可能在它开始监听前就发完了，
-    /// 所以内容同时留在这里，窗口上报「已就绪」时自己取走。
-    pending: Mutex<Option<api::ReadPayload>>,
+    pending: Mutex<Pending>,
     /// 样式版本。设置页每保存一次就加一，阅读窗口据此知道该重新读配置了；
     /// 窗口起来得晚时也靠它判断「手上这份内容」是不是当前样式的
     style_tick: Mutex<u64>,
@@ -98,8 +118,23 @@ impl State {
         }
     }
 
+    /// 记下「正文正在取」：窗口可以先出来摆「加载中」，别让网络挡着窗口露脸
+    fn mark_loading(&self) {
+        let mut guard = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        guard.loading = true;
+        guard.payload = None;
+    }
+
+    /// 正文到手（或彻底没戏）：「加载中」该收了
+    fn clear_loading(&self) {
+        let mut guard = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        guard.loading = false;
+    }
+
     fn set_pending(&self, payload: api::ReadPayload) {
-        *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(payload);
+        let mut guard = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        guard.payload = Some(payload);
+        guard.loading = false;
     }
 
     fn style_tick(&self) -> u64 {
@@ -132,11 +167,17 @@ impl State {
         true
     }
 
-    fn take_pending(&self) -> Option<api::ReadPayload> {
-        self.pending
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
+    /// 窗口装载完来取内容：`loading` 为真说明这份还在路上，窗口该接着等
+    fn take_pending(&self) -> PendingReply {
+        let mut guard = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        let payload = guard.payload.take();
+        if payload.is_some() {
+            guard.loading = false;
+        }
+        PendingReply {
+            loading: guard.loading,
+            payload,
+        }
     }
 
     fn take_toggle(&self) -> Option<&'static str> {
@@ -161,8 +202,9 @@ fn poll_toggle(state: tauri::State<'_, Arc<State>>) -> Option<String> {
 /// 阅读窗口装载完成后自己来要内容。
 ///
 /// 不用「建窗口后 emit」：事件可能在页面开始监听之前就发完了，正文会丢。
+/// `loading` 为真表示这份内容还在路上（窗口先出来、后取正文），窗口该接着摆「加载中」。
 #[tauri::command]
-fn take_pending(state: tauri::State<'_, Arc<State>>) -> Option<api::ReadPayload> {
+fn take_pending(state: tauri::State<'_, Arc<State>>) -> PendingReply {
     state.take_pending()
 }
 
@@ -315,9 +357,13 @@ fn save_reader_size(state: tauri::State<'_, Arc<State>>, width: f32, height: f32
 /// 书架上的「阅读」不是一个开关：窗口关着才新建，开着就是把这本（这一章）交到
 /// 同一个窗口上，不收起它 —— 收起是全局快捷键 / 托盘那一个开关的事
 /// （`Toggle::Close`，由主窗口直接 `close_reader`）。
+///
+/// **窗口先出来，正文后到**：取正文要联网，等它回来再建窗口的话，
+/// 「点阅读」到窗口露脸之间就是整段网络时间（慢的时候好几秒）。所以这里
+/// 只管把窗口摆到屏幕上（摆「加载中」），联网交给后台任务，取到再由它交过去。
 /// 换内容之前，阅读窗口会先把正在读的那一份进度写回去（见 `ReaderApp.load`）。
 #[tauri::command]
-async fn open_reader(
+fn open_reader(
     app: AppHandle,
     state: tauri::State<'_, Arc<State>>,
     book_url: String,
@@ -332,13 +378,26 @@ async fn open_reader(
         let mut cur = state.current_url.lock().unwrap_or_else(|e| e.into_inner());
         *cur = book_url.clone();
     }
-    let payload = load_chapter(&state, &book_url, chapter_index, chapter_title, start_line).await?;
     let cfg = state
         .config
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone();
-    present(&state, &app, &cfg, payload)
+    // 先把窗口叫出来（新建的那一个也在这时露脸），再让后台去取正文
+    state.mark_loading();
+    let win = present_window(&state, &app, &cfg)?;
+    // 已经开着的窗口收不到「刚装载」那一次查询，用事件告诉它开始等
+    let _ = win.emit("reader://loading", ());
+
+    let st = (*state).clone();
+    let app2 = app.clone();
+    tauri::async_runtime::spawn(async move {
+        match load_chapter(&st, &book_url, chapter_index, chapter_title, start_line).await {
+            Ok(payload) => deliver(&st, &app2, payload),
+            Err(e) => report_failure(&st, &app2, &e),
+        }
+    });
+    Ok(())
 }
 
 /// 设置改完，把已经开着的阅读窗口重新刷一遍。
@@ -419,13 +478,9 @@ async fn switch_chapter(
     };
     // 往回翻落到上一章末尾，往下翻从开头读
     let start_line = if direction < 0 { usize::MAX } else { 0 };
+    // 换章不重建窗口：窗口已经开着，正文到了就地换掉（窗口自己摆着「加载中」）
     let payload = load_chapter(&state, &book.book_url, target, title, start_line).await?;
-    let cfg = state
-        .config
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    present(&state, &app, &cfg, payload)?;
+    deliver(&state, &app, payload);
     Ok(())
 }
 
@@ -435,6 +490,7 @@ fn pending_payload(state: &Arc<State>) -> Option<api::ReadPayload> {
         .pending
         .lock()
         .unwrap_or_else(|e| e.into_inner())
+        .payload
         .clone()
 }
 
@@ -478,89 +534,82 @@ async fn load_chapter(
     })
 }
 
-/// 把一份内容交给阅读窗口：已开着就原地刷新，没有才新建。
-fn present(
+/// 让阅读窗口立刻出现在屏幕上（没有就新建）。
+///
+/// 只管窗口，不管内容：取正文要联网，那一下不该挡着窗口露脸 ——
+/// 内容到了由后台任务 `deliver` 交过去，这之前窗口摆「加载中」。
+/// 已经开着的窗口（含被收起的）只是再叫出来并置顶。
+fn present_window(
     state: &Arc<State>,
     app: &AppHandle,
     cfg: &Config,
-    payload: api::ReadPayload,
-) -> Result<(), String> {
+) -> Result<tauri::WebviewWindow, String> {
+    if let Some(win) = app.get_webview_window("reader") {
+        // 这一下只是换内容，别动它的开合 —— 该收起的时候走的是 `close_reader`
+        let _ = win.show();
+        let _ = win.set_focus();
+        state.set_reader_open(true);
+        return Ok(win);
+    }
+    let win = WebviewWindowBuilder::new(app, "reader", WebviewUrl::App("reader.html".into()))
+        .title("reader")
+        .inner_size(cfg.reader_width as f64, cfg.reader_height as f64)
+        .min_inner_size(260.0, 200.0)
+        .decorations(false)
+        // Windows 上无边框窗口默认是带投影的：tao 会为它留出一圈透明内边距
+        // （Win11 还顺带圆角），阅读窗口贴着屏幕看就是糊了一圈灰边。关掉投影，
+        // 窗口尺寸也才是「要多大就多大」，不用再减那圈内边距
+        .shadow(false)
+        .skip_taskbar(true)
+        .resizable(true)
+        .visible(false)
+        // 底色先给成阅读底色：窗口从无到有那一帧不再是一片白
+        .background_color(parse_color(&cfg.read_bg))
+        .build()
+        .map_err(|e| e.to_string())?;
+    win.show().map_err(|e| e.to_string())?;
+    win.set_focus().map_err(|e| e.to_string())?;
+    state.set_reader_open(true);
+    Ok(win)
+}
+
+/// 把一份正文交给已经在屏幕上的阅读窗口。
+///
+/// 内容同时留在 `pending` 里：窗口刚建那一瞬间的 emit 会丢（它还没开始监听），
+/// 那份内容得等它装载完自己来取（见 `take_pending`）。
+fn deliver(state: &Arc<State>, app: &AppHandle, payload: api::ReadPayload) {
     let payload = api::ReadPayload {
         style_tick: state.style_tick(),
         ..payload
     };
     state.set_pending(payload.clone());
-    match app.get_webview_window("reader") {
-        Some(win) => {
-            // 窗口已经开着：这一下只是换内容，别动它的开合 —— 该收起的时候
-            // 走的是 `close_reader`，不是这里
-            win.emit("reader://load", &payload)
-                .map_err(|e| e.to_string())?;
-            // 藏着的窗口（被收起过）也走这一支：再叫出来并置顶
-            let _ = win.show();
-            let _ = win.set_focus();
-            state.set_reader_open(true);
-            Ok(())
-        }
-        None => {
-            let win =
-                WebviewWindowBuilder::new(app, "reader", WebviewUrl::App("reader.html".into()))
-                    .title("reader")
-                    .inner_size(cfg.reader_width as f64, cfg.reader_height as f64)
-                    .min_inner_size(260.0, 200.0)
-                    .decorations(false)
-                    // Windows 上无边框窗口默认是带投影的：tao 会为它留出一圈透明内边距
-                    // （Win11 还顺带圆角），阅读窗口贴着屏幕看就是糊了一圈灰边。关掉投影，
-                    // 窗口尺寸也才是「要多大就多大」，不用再减那圈内边距
-                    .shadow(false)
-                    .skip_taskbar(true)
-                    .resizable(true)
-                    .visible(false)
-                    // 底色先给成阅读底色：窗口从无到有那一帧不再是一片白
-                    .background_color(parse_color(&cfg.read_bg))
-                    .build()
-                    .map_err(|e| e.to_string())?;
-            win.emit("reader://load", &payload)
-                .map_err(|e| e.to_string())?;
-            win.show().map_err(|e| e.to_string())?;
-            win.set_focus().map_err(|e| e.to_string())?;
-            state.set_reader_open(true);
-            Ok(())
-        }
+    if let Some(win) = app.get_webview_window("reader") {
+        let _ = win.emit("reader://load", &payload);
     }
 }
 
-/// 进度上报：本地记下读到哪一行，服务端记下读到哪一章 / 哪个位置。
+/// 正文没取到：窗口已经露脸了，得把「加载中」收掉并说一声为什么。
+fn report_failure(state: &Arc<State>, app: &AppHandle, message: &str) {
+    state.clear_loading();
+    // 发给所有窗口：阅读窗口收掉「加载中」并说一句，主窗口写进状态栏
+    let _ = app.emit("reader://failed", message.to_string());
+}
+
+/// 收尾上报的联网那一半：把读到哪一章 / 哪个位置写去服务端。
 ///
-/// 翻页、阅读窗口自己收起、快捷键收起、托盘退出，都要走这一份，所以抽出来。
+/// 认哪本书由调用方给进来（`book`），不在这里回头查「当前在读」——
+/// 这一路是后台跑的，跑到一半读者可能已经换了另一本，查出来会写到新书头上。
+/// 写不上去也就算了：进度差一屏，比窗口赖在屏幕上点不动强。
 /// `pos` 是正在阅读的正文位置，以字数计：本章第一屏是 0，翻到第 N 屏
 /// 就是前 N-1 屏那几个字；换章时给 0（从头读起）。
-async fn save_reading_progress(
-    state: &Arc<State>,
+async fn push_progress(
+    book: &api::Book,
+    base: &str,
     chapter_index: i64,
     chapter_title: &str,
-    line: usize,
     pos: i64,
-) -> Result<(), String> {
-    // 读的是哪本书由 `current_url` 说了算 —— 藏书那本书的位置没有别的来源。
-    // 书不在书架上（被远端移走了）就没有 bookUrl 可用，这次不写
-    let Some(book) = state.current_book() else {
-        return Ok(());
-    };
-    let base = state
-        .config
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .base_url
-        .clone();
-    progress::remember(
-        &book.book_url,
-        chapter_index,
-        chapter_title.to_string(),
-        line,
-    );
-    let _ = api::save_book_progress(&base, &book, chapter_index, pos, chapter_title).await;
-    Ok(())
+) {
+    let _ = api::save_book_progress(base, book, chapter_index, pos, chapter_title).await;
 }
 
 /// 翻页时上报进度。
@@ -607,15 +656,13 @@ async fn save_progress(
     Ok(())
 }
 
-/// 阅读窗口发来的进度收尾。
+/// 阅读窗口发来的收尾：先把窗口收了，进度丢到后台写。
 ///
-/// 两种情形走的是同一个命令：
-/// - `hide: true` —— 窗口真的要收起（Esc、点关闭、失焦、快捷键第二下），
-///   先把窗口藏了；
-/// - `hide: false` —— 只是收起前的最后一次同步：窗口还开着，收不收由窗口自己决定
-///   （比如失焦那一瞬间鼠标还按在窗口上拖着，这次就不该收）。
+/// **收起是读者能看见的那一下，必须立刻发生。** 写进度要联网（慢的时候好几秒），
+/// 等它写完再藏窗口，窗口就一直卡在屏幕上不响应。所以这里只同步做完「藏」，
+/// 剩下的交给后台任务；万一写不上去，最坏也只是进度差一屏 —— 比窗口点不动强。
 #[tauri::command]
-async fn close_reader(
+fn close_reader(
     app: AppHandle,
     state: tauri::State<'_, Arc<State>>,
     chapter_index: i64,
@@ -630,10 +677,28 @@ async fn close_reader(
         }
         state.set_reader_open(false);
     }
-    save_reading_progress(&state, chapter_index, &chapter_title, line, pos).await?;
-    // 进度落到服务端之后才通知主窗口刷新书架：书架上「读至第几章」要跟着变成
-    // 刚读到的那一章。这一下没写成功就别刷新 —— 刷回来的是一份旧进度
-    let _ = app.emit("reader://closed", ());
+    // 书与 baseUrl 在这一刻就拿走：后台任务不能再回头问「现在读的是哪本」——
+    // 那会儿读者可能已经另开了一本，进度就会写到新书头上
+    let book = state.current_book();
+    let base = state
+        .config
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .base_url
+        .clone();
+    // 本地这份（读到哪一行）当场落盘：它只是写一个小文件，不联网。
+    // 退出时后台那次上报可能被进程带走，有这份在，下次打开还接得上刚才翻到的地方
+    if let Some(book) = &book {
+        progress::remember(&book.book_url, chapter_index, chapter_title.clone(), line);
+    }
+    tauri::async_runtime::spawn(async move {
+        if let Some(book) = &book {
+            push_progress(book, &base, chapter_index, &chapter_title, pos).await;
+        }
+        // 进度写到服务端之后才通知主窗口刷新书架：书架上「读至第几章」要跟着变成
+        // 刚读到的那一章。这一下没写成功就别刷新 —— 刷回来的是一份旧进度
+        let _ = app.emit("reader://closed", ());
+    });
     Ok(())
 }
 
@@ -661,7 +726,7 @@ pub fn run() {
         config: Mutex::new(cfg.clone()),
         books: Mutex::new(Vec::new()),
         current_url: Mutex::new(String::new()),
-        pending: Mutex::new(None),
+        pending: Mutex::new(Pending::default()),
         style_tick: Mutex::new(0),
         reader_open: Mutex::new(false),
         hotkey_at: Mutex::new(None),
