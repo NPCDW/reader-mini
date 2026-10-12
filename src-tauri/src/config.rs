@@ -1,4 +1,4 @@
-//! 配置：baseUrl、阅读样式、快捷键、阅读窗口尺寸、失焦是否自动收起。
+//! 配置：baseUrl、阅读样式（含字体 / 字重 / 字距）、快捷键、阅读窗口尺寸、失焦是否自动收起。
 //!
 //! 落在系统配置目录（`~/.config/reader-mini/config.json`，Windows 在 `%APPDATA%`），
 //! 不进仓库、不进安装包。
@@ -13,8 +13,20 @@ pub struct Config {
     pub read_bg: String,
     pub read_fg: String,
     pub read_font_size: i32,
+    /// 正文字体族（CSS `font-family` 的值，如 `system-ui, sans-serif`）
+    pub read_font_family: String,
+    /// 正文字重（CSS `font-weight`：100..900 或 normal / bold）
+    pub read_font_weight: String,
+    /// 正文文字间距（CSS `letter-spacing` 的值，如 `0` / `1px` / `0.05em`）
+    pub read_letter_spacing: String,
     /// 正文行高倍数（相对字号）
     pub read_line_height: f32,
+    /// 阅读窗口内的三个快捷键：隐藏窗口 / 下一页 / 上一页。
+    /// 只写主键与修饰键的配置串（如 `Esc`、`PgDn`），阅读窗口照它认键；
+    /// 除这三个之外的一概不理（含鼠标滚轮与右键）
+    pub key_hide: String,
+    pub key_next: String,
+    pub key_prev: String,
     pub hotkey: String,
     pub reader_width: f32,
     pub reader_height: f32,
@@ -29,7 +41,13 @@ impl Default for Config {
             read_bg: "#181818".into(),
             read_fg: "#bdbdbd".into(),
             read_font_size: 20,
+            read_font_family: "system-ui".into(),
+            read_font_weight: "normal".into(),
+            read_letter_spacing: "0".into(),
             read_line_height: 1.5,
+            key_hide: "Esc".into(),
+            key_next: "PgDn".into(),
+            key_prev: "PgUp".into(),
             hotkey: "Alt+PgDn".into(),
             reader_width: 460.0,
             reader_height: 560.0,

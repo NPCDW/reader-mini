@@ -43,3 +43,53 @@ export function specFromEvent(event) {
   parts.push(key);
   return parts.join("+");
 }
+
+/**
+ * 配置串规范化：修饰键名统一大小写、字母主键转大写。
+ *
+ * 设置页是照着用户真实按下的键拼串的（`specFromEvent`），也可能手改配置文件，
+ * 两边写法统一之后再比，才不会出现 `ctrl+p` 与 `Ctrl+P` 对不上的情况。
+ */
+export function normalizeSpec(spec) {
+  return String(spec ?? "")
+    .split("+")
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .map((p) => {
+      const named = {
+        ctrl: "Ctrl",
+        control: "Ctrl",
+        alt: "Alt",
+        option: "Alt",
+        shift: "Shift",
+        super: "Super",
+        meta: "Super",
+        win: "Super",
+        cmd: "Super",
+      }[p.toLowerCase()];
+      if (named) return named;
+      // 字母主键一律大写：Shift 组合拼出来的常是小写
+      if (p.length === 1 && /[a-z]/i.test(p)) return p.toUpperCase();
+      return p;
+    })
+    .join("+");
+}
+
+/**
+ * 这次按键是不是配置串说的那一个。
+ *
+ * 认的是整串相等（含修饰键）：配置成 `Esc` 时 `Shift+Esc` 不算 ——
+ * 阅读窗口只放行配置的那三个，多一点修饰键就不是同一个键了。
+ */
+export function matchSpec(spec, event) {
+  const want = normalizeSpec(spec);
+  if (!want) return false;
+  return want === normalizeSpec(specFromEvent(event));
+}
+
+/** 显示名：把配置串写成读者看得懂的样子（`PgDn` -> `PgDn 下一页` 之类由调用方拼） */
+export function displaySpec(spec) {
+  const parts = normalizeSpec(spec).split("+").filter(Boolean);
+  const named = { PgUp: "PgUp", PgDn: "PgDn" };
+  return parts.map((p) => named[p] ?? p).join(" + ");
+}

@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, onUnmounted, reactive, ref } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
 import {
   call,
   getBookshelf,
@@ -58,13 +58,32 @@ const DEFAULT_CONFIG = {
   readBg: "#181818",
   readFg: "#bdbdbd",
   readFontSize: 20,
+  readFontFamily: "system-ui",
+  readFontWeight: "normal",
+  readLetterSpacing: "0",
   readLineHeight: 1.5,
+  keyHide: "Esc",
+  keyNext: "PgDn",
+  keyPrev: "PgUp",
   hotkey: "Alt+PgDn",
   readerWidth: 460,
   readerHeight: 560,
   // 阅读窗口失焦即收起是个容易误伤的行为（点一下别处窗口就没了），默认关掉
   closeOnBlur: false,
 };
+
+/** 版本号：侧栏底下那一行小字，跟 `package.json` / `tauri.conf.json` 同一个数 */
+const version = "0.6.4";
+
+/** 侧栏上「正在阅读」的小灯：有书正在读就亮，点一下把阅读窗口叫回来 */
+const reading = computed(
+  () => readerState.bookUrl !== "" || currentBookUrl.value !== "",
+);
+
+/** 当前目录属于哪本书（目录页标题旁那行小字） */
+const currentBookName = computed(
+  () => findBook(books.value, currentBookUrl.value)?.name ?? "",
+);
 
 async function bootstrap() {
   try {
@@ -199,6 +218,12 @@ async function continueReading() {
   await read(continueIndex(books.value, currentBookUrl.value));
 }
 
+/** 点顶栏那颗「正在阅读」小灯：窗口开着就收起，收着就叫出来 */
+async function toggleReader() {
+  const name = readerState.bookUrl ? "close" : "reader";
+  await handleToggle(name);
+}
+
 async function handleToggle(name) {
   if (name === "reader") {
     await continueReading();
@@ -284,148 +309,334 @@ onUnmounted(() => {
 
 <template>
   <div class="shell">
-    <header class="tabs">
-      <button :class="['tab', { on: tab === 'shelf' }]" @click="tab = 'shelf'">
-        书架
-      </button>
-      <button
-        :class="['tab', { on: tab === 'settings' }]"
-        @click="tab = 'settings'"
-      >
-        设置
-      </button>
-      <span class="spacer" />
-      <button class="tab ghost" :disabled="loading" @click="refresh()">
-        {{ loading ? "加载中…" : "刷新" }}
-      </button>
-    </header>
-
-    <main v-if="tab === 'shelf'" class="shelf">
-      <template v-if="page === 'books'">
-        <article
-          v-for="(book, i) in books"
-          :key="book.bookUrl || i"
-          class="book"
+    <aside class="rail">
+      <div class="brand">
+        <span class="mark" aria-hidden="true">📖</span>
+        <span class="name">reader-mini</span>
+      </div>
+      <nav class="nav">
+        <button
+          :class="['nav-item', { on: tab === 'shelf' }]"
+          @click="tab = 'shelf'"
         >
-          <div class="info">
-            <h3>{{ book.name }}</h3>
-            <p class="meta">
-              {{ book.author }} · 最新 {{ book.latestChapterTitle }}
-            </p>
-            <p class="progress">
-              读至 {{ book.durChapterIndex }} 章 · {{ book.durChapterTitle }}
-            </p>
-            <p class="intro">{{ book.intro }}</p>
-          </div>
-          <div class="actions">
-            <button
-              class="primary"
-              :disabled="openingUrl !== ''"
-              @click="read(i)"
-            >
-              <span
-                v-if="openingUrl === book.bookUrl"
-                class="spinner"
-                aria-hidden="true"
-              />
-              {{ openingUrl === book.bookUrl ? "加载中…" : "阅读" }}
-            </button>
-            <button class="plain" @click="openToc(i)">目录</button>
-          </div>
-        </article>
-        <p v-if="!books.length" class="empty">
-          {{
-            loading
-              ? "正在获取书架…"
-              : "书架为空：请先在「设置」里填写 baseUrl，再点刷新"
-          }}
+          <span class="ico" aria-hidden="true">▤</span>
+          <span>书架</span>
+          <span class="badge">{{ books.length }}</span>
+        </button>
+        <button
+          :class="['nav-item', { on: tab === 'settings' }]"
+          @click="tab = 'settings'"
+        >
+          <span class="ico" aria-hidden="true">⚙</span>
+          <span>设置</span>
+        </button>
+      </nav>
+      <div class="rail-foot">
+        <button class="ghost" :disabled="loading" @click="refresh()">
+          {{ loading ? "刷新中…" : "刷新书架" }}
+        </button>
+        <p class="ver">v{{ version }}</p>
+      </div>
+    </aside>
+
+    <div class="body">
+      <header class="topbar">
+        <h1>{{ tab === "shelf" ? "我的书架" : "设置" }}</h1>
+        <p v-if="tab === 'shelf'" class="crumb">
+          {{ page === "books" ? `${books.length} 本书` : currentBookName }}
         </p>
-      </template>
+        <span class="grow" />
+        <span v-if="reading" class="chip" @click="toggleReader">
+          <i class="dot" aria-hidden="true" />正在阅读
+        </span>
+      </header>
 
-      <template v-else>
-        <div class="toc-head">
-          <button class="plain" @click="page = 'books'">← 返回</button>
-          <strong>目录</strong>
-        </div>
-        <ul class="toc">
-          <li v-for="(ch, i) in chapters" :key="i" @click="openChapter(i)">
-            {{ ch.title }}
-          </li>
-        </ul>
-        <p v-if="!chapters.length" class="empty">暂无目录</p>
-      </template>
-    </main>
+      <main v-if="tab === 'shelf'" class="content">
+        <template v-if="page === 'books'">
+          <article v-for="(book, i) in books" :key="book.bookUrl || i" class="book">
+            <div class="cover" aria-hidden="true">
+              {{ (book.name || "?").slice(0, 1) }}
+            </div>
+            <div class="info">
+              <h3>{{ book.name }}</h3>
+              <p class="meta">{{ book.author }}</p>
+              <p class="progress">
+                <span>读至 {{ book.durChapterIndex }} 章</span>
+                <span class="sep">·</span>
+                <span class="ell">{{ book.durChapterTitle }}</span>
+              </p>
+              <p class="intro">{{ book.intro }}</p>
+            </div>
+            <div class="ops">
+              <button
+                class="primary"
+                :disabled="openingUrl !== ''"
+                @click="read(i)"
+              >
+                <span
+                  v-if="openingUrl === book.bookUrl"
+                  class="spinner"
+                  aria-hidden="true"
+                />
+                {{ openingUrl === book.bookUrl ? "加载中…" : "阅读" }}
+              </button>
+              <button class="plain" @click="openToc(i)">目录</button>
+            </div>
+          </article>
+          <p v-if="!books.length" class="empty">
+            {{
+              loading
+                ? "正在获取书架…"
+                : "书架为空：请先在「设置」里填写 baseUrl，再刷新"
+            }}
+          </p>
+        </template>
 
-    <SettingsPage v-else :config="config" :on-save="saveSettings" />
+        <template v-else>
+          <div class="toc-head">
+            <button class="plain" @click="page = 'books'">← 返回书架</button>
+            <strong>目录</strong>
+            <span class="grow" />
+            <span class="crumb">{{ chapters.length }} 章</span>
+          </div>
+          <ul class="toc">
+            <li v-for="(ch, i) in chapters" :key="i" @click="openChapter(i)">
+              <span class="no">{{ i + 1 }}</span>
+              <span class="t">{{ ch.title }}</span>
+            </li>
+          </ul>
+          <p v-if="!chapters.length" class="empty">暂无目录</p>
+        </template>
+      </main>
 
-    <footer class="status">{{ status }}</footer>
+      <SettingsPage v-else :config="config" :on-save="saveSettings" />
+
+      <footer class="statusbar">
+        <span :class="['status', { busy: loading }]">{{ status || "就绪" }}</span>
+      </footer>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .shell {
   display: flex;
-  flex-direction: column;
   height: 100%;
+  /* 主窗口是两栏：左边窄导航，右边内容。整窗不滚，只有内容区滚 */
+  overflow: hidden;
 }
 
-.tabs {
+/* ---- 左侧导航栏 ---- */
+.rail {
   display: flex;
-  gap: 6px;
-  padding: 6px;
+  flex-direction: column;
+  flex: 0 0 200px;
+  padding: 16px 12px;
+  background: #1a1c21;
+  border-right: 1px solid #2b2f37;
+}
+
+.brand {
+  display: flex;
   align-items: center;
+  gap: 8px;
+  padding: 0 6px 16px;
 }
 
-.tab {
-  width: 88px;
-  height: 36px;
+.mark {
+  font-size: 18px;
+}
+
+.name {
+  font-size: 15px;
+  font-weight: 600;
+  color: #e9ebee;
+  letter-spacing: 0.02em;
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 38px;
+  padding: 0 10px;
   border: none;
-  border-radius: 6px;
-  background: #2a2d34;
-  color: #c9cdd4;
-  cursor: pointer;
+  border-radius: 8px;
+  background: transparent;
+  color: #a2a9b4;
+  font: inherit;
   font-size: 14px;
+  cursor: pointer;
+  text-align: left;
 }
 
-.tab:hover:not(:disabled) {
-  background: #33373f;
+.nav-item:hover {
+  background: #22252b;
+  color: #d6d9de;
 }
 
-.tab:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.tab.on {
-  background: #4a6fa5;
+.nav-item.on {
+  background: #2b3a52;
   color: #fff;
 }
 
-.tab.ghost {
+.ico {
+  width: 18px;
+  text-align: center;
+  opacity: 0.8;
+}
+
+.badge {
   margin-left: auto;
+  padding: 0 6px;
+  height: 18px;
+  line-height: 18px;
+  border-radius: 9px;
+  background: #2a2d34;
+  color: #838994;
+  font-size: 11px;
 }
 
-.spacer {
+.nav-item.on .badge {
+  background: #3d5a80;
+  color: #dbe7f5;
+}
+
+.rail-foot {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ghost {
+  height: 34px;
+  border: 1px solid #33383f;
+  border-radius: 8px;
+  background: transparent;
+  color: #a2a9b4;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.ghost:hover:not(:disabled) {
+  background: #22252b;
+  color: #d6d9de;
+}
+
+.ghost:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.ver {
+  margin: 0;
+  padding-left: 2px;
+  font-size: 11px;
+  color: #5d626d;
+}
+
+/* ---- 右侧内容 ---- */
+.body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+.topbar {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid #24272d;
+}
+
+.topbar h1 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: #e9ebee;
+}
+
+.crumb {
+  margin: 0;
+  font-size: 12px;
+  color: #6f757f;
+}
+
+.grow {
   flex: 1;
 }
 
-.shelf {
+/* 「正在阅读」小灯：点一下把收起来的阅读窗口叫回来 */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 12px;
+  background: #23303f;
+  color: #7ea6dd;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.chip:hover {
+  background: #2b3a52;
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #7ea6dd;
+}
+
+.content {
   flex: 1;
-  /* flex 项默认不肯矮过内容（`min-height: auto`），不给 0 就会把外壳顶高，
-     外面那条滚动条就是它顶出来的 */
   min-height: 0;
   overflow-y: auto;
-  padding: 10px;
+  padding: 16px 20px;
 }
 
+/* ---- 书架卡片 ---- */
 .book {
   display: flex;
-  gap: 10px;
-  padding: 10px;
-  margin-bottom: 8px;
-  background: #212429;
-  border: 1px solid #2f333a;
-  border-radius: 8px;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 14px;
+  margin-bottom: 10px;
+  background: #1e2026;
+  border: 1px solid #2b2f37;
+  border-radius: 10px;
+  transition: border-color 0.15s ease;
+}
+
+.book:hover {
+  border-color: #3d5a80;
+}
+
+/* 书名首字当封面：没有封面图，一个字比空白像个书 */
+.cover {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 44px;
+  height: 58px;
+  border-radius: 6px;
+  background: linear-gradient(160deg, #3d5a80, #2b3a52);
+  color: #dbe7f5;
+  font-size: 22px;
+  font-weight: 600;
 }
 
 .info {
@@ -435,15 +646,15 @@ onUnmounted(() => {
 
 .info h3 {
   margin: 0;
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 600;
   color: #e9ebee;
 }
 
 .meta,
-.intro,
-.progress {
-  margin: 2px 0 0;
+.progress,
+.intro {
+  margin: 4px 0 0;
   font-size: 12px;
 }
 
@@ -452,7 +663,20 @@ onUnmounted(() => {
 }
 
 .progress {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   color: #7ea6dd;
+}
+
+.sep {
+  color: #4a4e57;
+}
+
+.ell {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .intro {
@@ -463,20 +687,21 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-.actions {
+.ops {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  width: 130px;
+  width: 96px;
+  flex: 0 0 auto;
 }
 
 button.primary,
 button.plain {
-  height: 34px;
+  height: 32px;
   border: none;
   border-radius: 6px;
   cursor: pointer;
-  font-size: 14px;
+  font-size: 13px;
 }
 
 button.primary {
@@ -519,16 +744,32 @@ button.primary .spinner {
   }
 }
 
+/* ---- 目录 ---- */
 .toc-head {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 8px;
+  margin-bottom: 12px;
 }
 
 .toc-head button {
-  width: 88px;
-  height: 32px;
+  width: 100px;
+  height: 30px;
+  border: none;
+  border-radius: 6px;
+  background: #2a2d34;
+  color: #c9cdd4;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.toc-head button:hover {
+  filter: brightness(1.15);
+}
+
+.toc-head strong {
+  color: #e9ebee;
 }
 
 .toc {
@@ -538,28 +779,60 @@ button.primary .spinner {
 }
 
 .toc li {
-  padding: 9px 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
   margin-bottom: 4px;
-  background: #212429;
+  background: #1e2026;
   border-radius: 6px;
   cursor: pointer;
+  font-size: 13px;
+  color: #c9cdd4;
 }
 
 .toc li:hover {
   background: #2b3037;
+  color: #e9ebee;
+}
+
+.toc .no {
+  flex: 0 0 28px;
+  color: #5d626d;
+  font-size: 11px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.toc .t {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .empty {
+  padding: 48px 0;
   text-align: center;
   color: #767c86;
+  font-size: 13px;
+}
+
+/* ---- 状态栏 ---- */
+.statusbar {
+  display: flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 20px;
+  border-top: 1px solid #24272d;
+  background: #1a1c21;
 }
 
 .status {
-  height: 26px;
-  line-height: 26px;
-  padding: 0 10px;
-  color: #7ea6dd;
   font-size: 12px;
-  border-top: 1px solid #2f333a;
+  color: #7ea6dd;
+}
+
+.status.busy {
+  color: #d8b46a;
 }
 </style>
