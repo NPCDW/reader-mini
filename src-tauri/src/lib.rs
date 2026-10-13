@@ -896,6 +896,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Theme;
 
     fn book(url: &str, name: &str) -> api::Book {
         api::Book {
