@@ -275,20 +275,24 @@ fn parse_color(hex: &str) -> tauri::window::Color {
 fn save_config(
     app: AppHandle,
     state: tauri::State<'_, Arc<State>>,
-    config: Config,
+    mut config: Config,
 ) -> Result<Config, String> {
+    // 主题这一块先整理：新增的主题 id 可能空着、选中的主题可能刚被删掉。
+    // 存下去的必须是「整理过」的那份，前端也照这个回写表单
+    config.normalize();
     let (old_hotkey, old_bg) = {
         let mut guard = state.config.lock().unwrap_or_else(|e| e.into_inner());
-        let old = (guard.hotkey.clone(), guard.read_bg.clone());
+        let old = (guard.hotkey.clone(), guard.active_theme().bg);
         *guard = config.clone();
         guard.save().map_err(|e| e.to_string())?;
         old
     };
     // 阅读底色换了就把窗口底色也换掉：下次呼出（以及窗口缩放露出的那几像素）
-    // 才会是新的色，不会先白一下再变暗
-    if old_bg != config.read_bg {
+    // 才会是新的色，不会先白一下再变暗。换主题也算换底色
+    let bg = config.active_theme().bg;
+    if old_bg != bg {
         if let Some(win) = app.get_webview_window("reader") {
-            let _ = win.set_background_color(Some(parse_color(&config.read_bg)));
+            let _ = win.set_background_color(Some(parse_color(&bg)));
         }
     }
     if hotkey::normalize(&old_hotkey) == hotkey::normalize(&config.hotkey) {
@@ -606,7 +610,7 @@ fn present_window(
         .resizable(true)
         .visible(false)
         // 底色先给成阅读底色：窗口从无到有那一帧不再是一片白
-        .background_color(parse_color(&cfg.read_bg))
+        .background_color(parse_color(&cfg.active_theme().bg))
         .build()
         .map_err(|e| e.to_string())?;
     win.show().map_err(|e| e.to_string())?;
@@ -928,6 +932,48 @@ mod tests {
     fn missing_book_has_no_match() {
         let shelf = vec![book("https://example.org/a", "甲")];
         assert!(State::find_book(&shelf, "https://example.org/gone").is_none());
+    }
+
+    /// 老配置没有主题这一项：那几项散着的样式就是「默认主题」，不能丢
+    #[test]
+    fn legacy_config_becomes_the_default_theme() {
+        let mut cfg = Config::default();
+        cfg.themes.clear();
+        cfg.read_bg = "#202020".into();
+        cfg.read_letter_spacing = "1px".into();
+        cfg.normalize();
+        assert_eq!(cfg.themes.len(), 1);
+        assert_eq!(cfg.themes[0].name, "默认主题");
+        assert_eq!(cfg.themes[0].bg, "#202020");
+        assert_eq!(cfg.themes[0].letter_spacing, "1px");
+        // 选中项要落在主题里，否则阅读窗口读样式时找不到人
+        assert_eq!(cfg.read_theme_id, cfg.themes[0].id);
+    }
+
+    /// 选中的主题被删掉之后，退回第一套 —— 不能留下一个指不到人的 id
+    #[test]
+    fn missing_active_theme_falls_back_to_the_first() {
+        let mut cfg = Config::default();
+        cfg.themes = vec![Theme {
+            id: "a".into(),
+            name: "甲".into(),
+            bg: "#111111".into(),
+            ..Theme::default()
+        }];
+        cfg.read_theme_id = "gone".into();
+        cfg.normalize();
+        assert_eq!(cfg.read_theme_id, "a");
+        assert_eq!(cfg.active_theme().bg, "#111111");
+    }
+
+    /// 主题一个不剩（被删空了）也得有一套样式可读
+    #[test]
+    fn empty_theme_list_still_yields_a_theme() {
+        let mut cfg = Config::default();
+        cfg.themes.clear();
+        cfg.normalize();
+        assert_eq!(cfg.themes.len(), 1);
+        assert_eq!(cfg.active_theme().id, cfg.read_theme_id);
     }
 
     /// 交给阅读窗口的正文里必须带上 `bookUrl`：阅读窗口只看过这份 payload，

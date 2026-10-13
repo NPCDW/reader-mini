@@ -1,6 +1,7 @@
 <script setup>
-import { reactive, ref, watch } from "vue";
+import { computed, reactive, ref, watch } from "vue";
 import { specFromEvent } from "../keys";
+import { newThemeId, normalizeTheme, themePatch, THEME_DEFAULTS } from "../theme";
 
 const props = defineProps({
   config: { type: Object, required: true },
@@ -8,6 +9,8 @@ const props = defineProps({
   // `emit()` 拿不到父组件的返回值。
   onSave: { type: Function, required: true },
 });
+
+const emit = defineEmits(["dirty"]);
 
 // 与 Rust 侧 Config::default() 同一套默认值：回退到默认时不能回退成另一套
 const DEFAULTS = {
@@ -44,28 +47,101 @@ const KEY_SLOTS = [
 ];
 
 const form = reactive({ ...DEFAULTS });
-
+/**
+ * 主题列表与当前主题。不复用 `form.readBg` 那一堆：表单里那份是正在编辑的
+ * 「草稿」，主题列表是「存着的几套」—— 读者点一下别的圆圈就该整份换过来，
+ * 两者混在一起会让「改了一半再切主题」变得说不清。
+ */
+const themes = ref([]);
+const activeId = ref("");
 const capturing = ref("");
 const hotkeyError = ref("");
+
+/** 正在编辑的那一套；id 指不到人时退回第一套（后端也是这么兜的） */
+const activeTheme = computed(
+  () => themes.value.find((t) => t.id === activeId.value) ?? themes.value[0],
+);
+
+/** 主题里的圆圈：背景是这套主题的底色，圈里那个「字」用的是这套的字 */
+function swatchStyle(theme) {
+  return {
+    background: theme.bg,
+    color: theme.fg,
+    fontFamily: theme.fontFamily,
+    fontWeight: theme.fontWeight,
+  };
+}
+
+/** 改了主题里的一项：写回草稿，并让顶栏那颗「保存」亮起来 */
+function touch() {
+  emit("dirty", true);
+}
+
+function updateTheme(key, value) {
+  if (!activeTheme.value) return;
+  activeTheme.value[key] = value;
+  touch();
+}
+
+function selectTheme(id) {
+  activeId.value = id;
+  touch();
+}
+
+/**
+ * 新增：照当前这套复制一份，改名、换新 id。
+ * 复制而不是从零开始 —— 读者多半是想「在这套基础上再改一点」。
+ */
+function addTheme() {
+  const base = activeTheme.value ?? THEME_DEFAULTS;
+  const theme = normalizeTheme(
+    { ...base, id: newThemeId(), name: `主题 ${themes.value.length + 1}` },
+    `主题 ${themes.value.length + 1}`,
+  );
+  themes.value.push(theme);
+  activeId.value = theme.id;
+  touch();
+}
+
+/**
+ * 删除：至少留一套。
+ *
+ * 删掉的正好是当前这套时，就近选一套（删的是最后一个就往前一个），
+ * 不能让「选中项」空着 —— 阅读窗口要照它排。
+ */
+function removeTheme(id) {
+  if (themes.value.length <= 1) {
+    hotkeyError.value = "至少留一套字体主题";
+    return;
+  }
+  const at = themes.value.findIndex((t) => t.id === id);
+  if (at < 0) return;
+  themes.value.splice(at, 1);
+  if (activeId.value === id) {
+    activeId.value = themes.value[Math.min(at, themes.value.length - 1)].id;
+  }
+  hotkeyError.value = "";
+  touch();
+}
 
 watch(
   () => props.config,
   (c) => {
     if (!c) return;
     form.baseUrl = c.baseUrl ?? DEFAULTS.baseUrl;
-    form.readBg = c.readBg || DEFAULTS.readBg;
-    form.readFg = c.readFg || DEFAULTS.readFg;
-    form.readFontSize = c.readFontSize ?? DEFAULTS.readFontSize;
-    form.readFontFamily = c.readFontFamily || DEFAULTS.readFontFamily;
-    form.readFontWeight = c.readFontWeight || DEFAULTS.readFontWeight;
-    form.readLetterSpacing = c.readLetterSpacing ?? DEFAULTS.readLetterSpacing;
-    form.readLineHeight = c.readLineHeight ?? DEFAULTS.readLineHeight;
     form.keyHide = c.keyHide || DEFAULTS.keyHide;
     form.keyNext = c.keyNext || DEFAULTS.keyNext;
     form.keyPrev = c.keyPrev || DEFAULTS.keyPrev;
     form.hotkey = c.hotkey || DEFAULTS.hotkey;
     // 后端可能还没有这一项（旧配置），没有就按默认关掉
     form.closeOnBlur = c.closeOnBlur === true;
+
+    const list = Array.isArray(c.themes) && c.themes.length ? c.themes : [];
+    themes.value = list.map((t, i) => normalizeTheme(t, i === 0 ? "默认主题" : `主题 ${i + 1}`));
+    if (!themes.value.length) themes.value.push(normalizeTheme({ id: "default" }));
+    const wanted = themes.value.some((t) => t.id === c.readThemeId);
+    activeId.value = wanted ? c.readThemeId : themes.value[0].id;
+    emit("dirty", false);
   },
   { immediate: true, deep: true },
 );
@@ -105,31 +181,50 @@ async function save() {
     hotkeyError.value = "阅读快捷键三个不能设成同一个键";
     return;
   }
-  const bg = form.readBg.trim();
-  const fg = form.readFg.trim();
-  if (
-    !bg ||
-    !fg ||
-    !/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(bg) ||
-    !/#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(fg)
-  ) {
-    hotkeyError.value = "颜色要写成十六进制，如 #181818";
+  if (!themes.value.length) {
+    hotkeyError.value = "至少留一套字体主题";
     return;
   }
-  const letterSpacing = form.readLetterSpacing.trim() || DEFAULTS.readLetterSpacing;
-  if (!/^(0|[+-]?(\d+(\.\d+)?)(px|em|rem|%)?)$/.test(letterSpacing)) {
-    hotkeyError.value = "字距要写成 0、1px 或 0.05em 这样";
+  // 名字不能空也不能重：圆圈底下就那一行字，两套同名读者分不出点的是哪套
+  const names = themes.value.map((t) => t.name.trim());
+  if (names.some((n) => !n)) {
+    hotkeyError.value = "字体主题要有名字";
     return;
   }
+  if (new Set(names).size !== names.length) {
+    hotkeyError.value = "字体主题不要重名";
+    return;
+  }
+  // 每一套都要查，不只当前这套：存下去的是整份主题列表
+  for (const theme of themes.value) {
+    const name = theme.name.trim();
+    if (
+      !/#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(theme.bg.trim()) ||
+      !/#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(theme.fg.trim())
+    ) {
+      hotkeyError.value = `主题「${name}」的颜色要写成十六进制，如 #181818`;
+      return;
+    }
+    if (!/^(0|[-+]?\d*\.?\d+(px|em|rem|%)?)$/.test(theme.letterSpacing.trim())) {
+      hotkeyError.value = `主题「${name}」的字距要写成 0、1px 或 0.05em 这样`;
+      return;
+    }
+  }
+  // 存下去的是整理过的那份：名字去了空白、缺项按默认补齐
+  const savedThemes = themes.value.map((t) =>
+    normalizeTheme({ ...t, name: t.name.trim() }),
+  );
   const message = await props.onSave({
     baseUrl: form.baseUrl.trim(),
-    readBg: bg,
-    readFg: fg,
-    readFontSize: Number(form.readFontSize) || DEFAULTS.readFontSize,
-    readFontFamily: form.readFontFamily.trim() || DEFAULTS.readFontFamily,
-    readFontWeight: form.readFontWeight,
-    readLetterSpacing: letterSpacing,
-    readLineHeight: Number(form.readLineHeight) || DEFAULTS.readLineHeight,
+    themes: savedThemes,
+    readThemeId: savedThemes.some((t) => t.id === activeId.value)
+      ? activeId.value
+      : savedThemes[0].id,
+    // 正在用的那一套照旧摊到那几个字段上：阅读窗口从配置里读的就是它们，
+    // 主题是给设置页看的组织方式
+    ...themePatch(
+      savedThemes.find((t) => t.id === activeId.value) ?? savedThemes[0],
+    ),
     keyHide: form.keyHide.trim() || DEFAULTS.keyHide,
     keyNext: form.keyNext.trim() || DEFAULTS.keyNext,
     keyPrev: form.keyPrev.trim() || DEFAULTS.keyPrev,
@@ -137,7 +232,16 @@ async function save() {
     closeOnBlur: form.closeOnBlur === true,
   });
   hotkeyError.value = message ? String(message) : "";
+  if (!message) emit("dirty", false);
 }
+
+/**
+ * 顶栏那颗「保存」按的就是这里。
+ *
+ * 走同一套校验与同一个 `onSave`，返回值是给状态栏的那句话（成功是空串）——
+ * 保存这件事只留一条路，顶栏与页内那颗按钮不会给出不一样的结论。
+ */
+defineExpose({ submit: save });
 </script>
 
 <template>
@@ -151,64 +255,139 @@ async function save() {
     </section>
 
     <section class="card">
-      <h2>阅读样式</h2>
-      <p class="hint">保存后立刻作用到已打开的阅读窗口，不用把它关掉重开</p>
-      <div class="grid">
-        <label class="field">
-          <span>背景色</span>
-          <input v-model="form.readBg" type="text" spellcheck="false" />
-        </label>
-        <label class="field">
-          <span>字体色</span>
-          <input v-model="form.readFg" type="text" spellcheck="false" />
-        </label>
-        <label class="field">
-          <span>字号</span>
-          <input
-            v-model.number="form.readFontSize"
-            type="number"
-            min="8"
-            max="72"
-          />
-        </label>
-        <label class="field">
-          <span>行高倍数</span>
-          <input
-            v-model.number="form.readLineHeight"
-            type="number"
-            step="0.1"
-            min="1"
-          />
-        </label>
+      <h2>字体主题</h2>
+      <p class="hint">
+        一套主题就是一套阅读样式：底色、字色、字体、字号、字重、字距、行高。
+        点圆圈选中它，被选中的那套就是阅读页面的样式；一条圆圈一套，圆圈的底是
+        这套的底色，圈里那个「字」用的是这套的字与字色
+      </p>
+
+      <div class="themes">
+        <div
+          v-for="theme in themes"
+          :key="theme.id"
+          :class="['theme', { on: theme.id === activeId }]"
+          role="button"
+          :aria-pressed="theme.id === activeId"
+          :title="theme.name"
+          @click="selectTheme(theme.id)"
+        >
+          <span class="swatch" :style="swatchStyle(theme)">字</span>
+          <span class="tname">{{ theme.name }}</span>
+        </div>
+        <div class="theme add" role="button" title="新增主题" @click="addTheme">
+          <span class="swatch plus">＋</span>
+          <span class="tname">新增</span>
+        </div>
       </div>
-      <div class="grid">
-        <label class="field wide">
-          <span>字体</span>
-          <input
-            v-model="form.readFontFamily"
-            type="text"
-            spellcheck="false"
-            placeholder="system-ui、Microsoft YaHei、serif…"
-          />
-        </label>
-        <label class="field">
-          <span>字重</span>
-          <select v-model="form.readFontWeight">
-            <option v-for="w in FONT_WEIGHTS" :key="w.value" :value="w.value">
-              {{ w.label }}
-            </option>
-          </select>
-        </label>
-        <label class="field">
-          <span>字距</span>
-          <input
-            v-model="form.readLetterSpacing"
-            type="text"
-            spellcheck="false"
-            placeholder="0、1px、0.05em"
-          />
-        </label>
-      </div>
+
+      <template v-if="activeTheme">
+        <div class="grid">
+          <label class="field name">
+            <span>主题名称</span>
+            <input
+              :value="activeTheme.name"
+              type="text"
+              spellcheck="false"
+              @input="updateTheme('name', $event.target.value)"
+            />
+          </label>
+          <span class="grow" />
+          <button
+            class="plain danger"
+            :disabled="themes.length <= 1"
+            @click="removeTheme(activeTheme.id)"
+          >
+            删除这个主题
+          </button>
+        </div>
+        <div class="grid">
+          <label class="field">
+            <span>背景色</span>
+            <input
+              :value="activeTheme.bg"
+              type="text"
+              spellcheck="false"
+              @input="updateTheme('bg', $event.target.value)"
+            />
+          </label>
+          <label class="field">
+            <span>字体色</span>
+            <input
+              :value="activeTheme.fg"
+              type="text"
+              spellcheck="false"
+              @input="updateTheme('fg', $event.target.value)"
+            />
+          </label>
+          <label class="field">
+            <span>字号</span>
+            <input
+              :value="activeTheme.fontSize"
+              type="number"
+              min="8"
+              max="72"
+              @input="updateTheme('fontSize', Number($event.target.value))"
+            />
+          </label>
+          <label class="field">
+            <span>行高倍数</span>
+            <input
+              :value="activeTheme.lineHeight"
+              type="number"
+              step="0.1"
+              min="1"
+              @input="updateTheme('lineHeight', Number($event.target.value))"
+            />
+          </label>
+        </div>
+        <div class="grid">
+          <label class="field wide">
+            <span>字体</span>
+            <input
+              :value="activeTheme.fontFamily"
+              type="text"
+              spellcheck="false"
+              placeholder="system-ui、Microsoft YaHei、serif…"
+              @input="updateTheme('fontFamily', $event.target.value)"
+            />
+          </label>
+          <label class="field">
+            <span>字重</span>
+            <select
+              :value="activeTheme.fontWeight"
+              @change="updateTheme('fontWeight', $event.target.value)"
+            >
+              <option v-for="w in FONT_WEIGHTS" :key="w.value" :value="w.value">
+                {{ w.label }}
+              </option>
+            </select>
+          </label>
+          <label class="field">
+            <span>字距</span>
+            <input
+              :value="activeTheme.letterSpacing"
+              type="text"
+              spellcheck="false"
+              placeholder="0、1px、0.05em"
+              @input="updateTheme('letterSpacing', $event.target.value)"
+            />
+          </label>
+        </div>
+        <p class="preview" :style="{ background: activeTheme.bg, color: activeTheme.fg }">
+          <span
+            :style="{
+              fontFamily: activeTheme.fontFamily,
+              fontWeight: activeTheme.fontWeight,
+              fontSize: `${activeTheme.fontSize}px`,
+              letterSpacing: activeTheme.letterSpacing,
+              lineHeight: activeTheme.lineHeight,
+            }"
+          >
+            这段字就是阅读页面的样子。
+          </span>
+        </p>
+      </template>
     </section>
 
     <section class="card">
@@ -273,7 +452,9 @@ async function save() {
 
     <div class="actions">
       <button class="primary" @click="save">保存设置</button>
-      <button class="plain" @click="startCapture('')">取消录制</button>
+      <button v-if="capturing" class="plain" @click="startCapture('')">
+        取消录制
+      </button>
     </div>
   </div>
 </template>
@@ -318,6 +499,96 @@ async function save() {
 
 .grid.keys {
   flex-wrap: wrap;
+}
+
+/* ---- 字体主题：一条圆圈一套，「选中的那套」用一圈边框标出来 ---- */
+.themes {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.theme {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: 62px;
+  cursor: pointer;
+}
+
+/* 圆圈：底是这套主题的底色，圈里那个「字」用的就是这套的字与字色 */
+.swatch {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 1px solid #3a3f47;
+  font-size: 18px;
+  line-height: 1;
+  user-select: none;
+}
+
+.theme.on .swatch {
+  /* 选中：留一圈呼吸的缝，再套一层亮边 —— 圈与圈之间不挤在一起才看得清 */
+  box-shadow: 0 0 0 3px #1e2026, 0 0 0 5px #4a6fa5;
+}
+
+.theme.add .swatch {
+  background: #212429;
+  color: #838994;
+  border-style: dashed;
+}
+
+.theme:hover .swatch {
+  border-color: #4a6fa5;
+}
+
+.tname {
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 12px;
+  color: #a2a9b4;
+}
+
+.theme.on .tname {
+  color: #7ea6dd;
+}
+
+/* 主题名那一行：左边输入框，右边「删除这个主题」 */
+.grid .grow {
+  flex: 1;
+}
+
+.grid .field.name {
+  flex: 0 1 220px;
+  max-width: 220px;
+}
+
+.plain.danger {
+  align-self: flex-end;
+  color: #e0685a;
+  border: 1px solid #4a2f2c;
+  background: #2a1f1e;
+}
+
+.plain.danger:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* 小样：直接拿这套主题的色与字排一段，选之前先看见 */
+.preview {
+  margin: 0;
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid #2b2f37;
+  overflow: hidden;
 }
 
 .grid.keys .field {

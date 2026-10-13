@@ -17,6 +17,7 @@ import {
 } from "./bridge";
 import SettingsPage from "./components/SettingsPage.vue";
 import { continueIndex, findBook } from "./bookshelf";
+import { migrate } from "./theme";
 
 const tab = ref("shelf");
 const page = ref("books");
@@ -36,6 +37,8 @@ const openingUrl = ref("");
 const status = ref("");
 
 const config = ref(null);
+/** 设置页实例：顶栏那颗「保存」要能叫它交作业（见 `saveFromTopbar`） */
+const settingsRef = ref(null);
 /** 设置保存后递增，让已开着的阅读窗口重新读一遍样式 */
 const styleTick = ref(0);
 /** 阅读窗口最近一次回传的位置，收起 / 退出时用它把进度收干净 */
@@ -55,6 +58,8 @@ let stopFailed = null;
 // 与 Rust 侧 Config::default() 同一套默认值
 const DEFAULT_CONFIG = {
   baseUrl: "http://127.0.0.1:1122",
+  themes: [],
+  readThemeId: "",
   readBg: "#181818",
   readFg: "#bdbdbd",
   readFontSize: 20,
@@ -75,10 +80,8 @@ const DEFAULT_CONFIG = {
 /** 版本号：侧栏底下那一行小字，跟 `package.json` / `tauri.conf.json` 同一个数 */
 const version = "0.6.4";
 
-/** 侧栏上「正在阅读」的小灯：有书正在读就亮，点一下把阅读窗口叫回来 */
-const reading = computed(
-  () => readerState.bookUrl !== "" || currentBookUrl.value !== "",
-);
+/** 设置页里那份表单有没有改过：顶栏的「保存」据此决定亮不亮 */
+const dirty = ref(false);
 
 /** 当前目录属于哪本书（目录页标题旁那行小字） */
 const currentBookName = computed(
@@ -87,7 +90,10 @@ const currentBookName = computed(
 
 async function bootstrap() {
   try {
-    config.value = { ...DEFAULT_CONFIG, ...(await getConfig()) };
+    const raw = { ...DEFAULT_CONFIG, ...(await getConfig()) };
+    // 旧配置里那些散着的 readXxx 到这里才变成「默认主题」
+    const { themes, id } = migrate(raw);
+    config.value = { ...raw, themes, readThemeId: id };
   } catch {
     config.value = { ...DEFAULT_CONFIG };
   }
@@ -218,12 +224,6 @@ async function continueReading() {
   await read(continueIndex(books.value, currentBookUrl.value));
 }
 
-/** 点顶栏那颗「正在阅读」小灯：窗口开着就收起，收着就叫出来 */
-async function toggleReader() {
-  const name = readerState.bookUrl ? "close" : "reader";
-  await handleToggle(name);
-}
-
 async function handleToggle(name) {
   if (name === "reader") {
     await continueReading();
@@ -252,10 +252,14 @@ async function handleToggle(name) {
 
 async function saveSettings(next) {
   try {
-    config.value = {
+    const saved = {
       ...DEFAULT_CONFIG,
       ...(await saveConfig({ ...config.value, ...next })),
     };
+    // 后端会把主题整理一遍（补 id / 补名字 / 选中项兜底），照它回来的那份为准
+    const { themes, id } = migrate(saved);
+    config.value = { ...saved, themes, readThemeId: id };
+    dirty.value = false;
     // 背景色 / 字色 / 字号 / 行高改了，已经开着的阅读窗口也得换上新样式：
     // 递增标记 + 重新呼出一次，阅读窗口收到就原地重排
     styleTick.value += 1;
@@ -267,6 +271,16 @@ async function saveSettings(next) {
     status.value = msg;
     return msg;
   }
+}
+
+/**
+ * 顶栏那颗「保存」：让设置页走它自己那一套校验（颜色、字距、快捷键冲突），
+ * 校验过了再交给 `saveSettings`。校验没过就把那句话留在状态栏 ——
+ * 顶栏离设置页远，光在那儿标红读者看不见。
+ */
+async function saveFromTopbar() {
+  const message = await settingsRef.value?.submit();
+  if (message) status.value = message;
 }
 
 onMounted(async () => {
@@ -332,9 +346,6 @@ onUnmounted(() => {
         </button>
       </nav>
       <div class="rail-foot">
-        <button class="ghost" :disabled="loading" @click="refresh()">
-          {{ loading ? "刷新中…" : "刷新书架" }}
-        </button>
         <p class="ver">v{{ version }}</p>
       </div>
     </aside>
@@ -346,9 +357,23 @@ onUnmounted(() => {
           {{ page === "books" ? `${books.length} 本书` : currentBookName }}
         </p>
         <span class="grow" />
-        <span v-if="reading" class="chip" @click="toggleReader">
-          <i class="dot" aria-hidden="true" />正在阅读
-        </span>
+        <!-- 书架的右上角：刷新书架；设置的右上角：保存 -->
+        <button
+          v-if="tab === 'shelf'"
+          class="top-action"
+          :disabled="loading"
+          @click="refresh()"
+        >
+          {{ loading ? "刷新中…" : "刷新书架" }}
+        </button>
+        <button
+          v-else
+          class="top-action primary"
+          :class="{ armed: dirty }"
+          @click="saveFromTopbar"
+        >
+          保存
+        </button>
       </header>
 
       <main v-if="tab === 'shelf'" class="content">
@@ -409,7 +434,13 @@ onUnmounted(() => {
         </template>
       </main>
 
-      <SettingsPage v-else :config="config" :on-save="saveSettings" />
+      <SettingsPage
+        v-else
+        ref="settingsRef"
+        :config="config"
+        :on-save="saveSettings"
+        @dirty="dirty = $event"
+      />
 
       <footer class="statusbar">
         <span :class="['status', { busy: loading }]">{{ status || "就绪" }}</span>
@@ -515,27 +546,6 @@ onUnmounted(() => {
   gap: 8px;
 }
 
-.ghost {
-  height: 34px;
-  border: 1px solid #33383f;
-  border-radius: 8px;
-  background: transparent;
-  color: #a2a9b4;
-  font: inherit;
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.ghost:hover:not(:disabled) {
-  background: #22252b;
-  color: #d6d9de;
-}
-
-.ghost:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-
 .ver {
   margin: 0;
   padding-left: 2px;
@@ -576,29 +586,38 @@ onUnmounted(() => {
   flex: 1;
 }
 
-/* 「正在阅读」小灯：点一下把收起来的阅读窗口叫回来 */
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 24px;
-  padding: 0 10px;
-  border-radius: 12px;
-  background: #23303f;
-  color: #7ea6dd;
-  font-size: 12px;
+/* 右上角那一颗：书架上是「刷新书架」，设置里是「保存」 */
+.top-action {
+  align-self: center;
+  height: 30px;
+  padding: 0 14px;
+  border: 1px solid #33383f;
+  border-radius: 7px;
+  background: #212429;
+  color: #c9cdd4;
+  font: inherit;
+  font-size: 13px;
   cursor: pointer;
 }
 
-.chip:hover {
-  background: #2b3a52;
+.top-action:hover:not(:disabled) {
+  filter: brightness(1.18);
 }
 
-.dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #7ea6dd;
+.top-action:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.top-action.primary {
+  border-color: transparent;
+  background: #4a6fa5;
+  color: #fff;
+}
+
+/* 表单改过：这颗「保存」才亮起来，读者一眼看得出还有没落地的改动 */
+.top-action.primary.armed {
+  box-shadow: 0 0 0 2px rgba(74, 111, 165, 0.35);
 }
 
 .content {

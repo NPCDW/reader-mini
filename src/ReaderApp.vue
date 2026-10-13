@@ -13,6 +13,7 @@ import {
   takePending,
 } from "./bridge";
 import { matchSpec } from "./keys";
+import { themePatch } from "./theme";
 import {
   clipHeight,
   lineHeightOf,
@@ -143,6 +144,20 @@ const textEl = ref(null);
 const tailEl = ref(null);
 /** 量高度用的探针，不可见 */
 const probeEl = ref(null);
+/**
+ * 探针的排版：与正文逐项对齐（同宽、同字号、同字距、同行高）。
+ *
+ * 由这里绑定给出（脚本那边只管 `syncProbe` 的宽高换算）—— 字距、字重这些
+ * 只要探针和正文差一点，量出来的行数与行高就跟着差，而分页正是照探针量的。
+ */
+const probeStyle = computed(() => ({
+  width: `${bodyWidth.value - SIDE_PAD * 2}px`,
+  fontSize: `${fontSize.value}px`,
+  fontFamily: fontFamily.value,
+  fontWeight: fontWeight.value,
+  letterSpacing: letterSpacing.value,
+  lineHeight: String(lineHeightFactor.value),
+}));
 
 const bodyWidth = ref(0);
 /** 滚动容器能拿到的可视高度（原始值，随时可能变） */
@@ -315,11 +330,17 @@ function estimatedRowChars(count) {
   );
 }
 
-/** 探针调到与正文一模一样的排版：同宽、同字号、同行高 */
+/**
+ * 探针调到与正文一模一样的排版：同宽、同字号、同字距、同行高。
+ *
+ * 排版由 `probeStyle` 绑定、这里补上宽度（宽度要开窗后才量得到）：
+ * 字距这种东西只要探针和正文差一点，量出来的行数就跟着差 ——
+ * 而分页正是按探针量的（见 `measuredRows`）。
+ */
 function syncProbe() {
   const el = probeEl.value;
   if (!el) return;
-  el.style.width = `${Math.max(bodyWidth.value - SIDE_PAD * 2, 80)}px`;
+  el.style.width = `${bodyWidth.value - SIDE_PAD * 2}px`;
   el.style.fontSize = `${fontSize.value}px`;
   el.style.fontFamily = fontFamily.value;
   el.style.fontWeight = fontWeight.value;
@@ -753,7 +774,11 @@ async function onKeydown(event) {
   }
   if (matchSpec(keyHide.value, event)) {
     event.preventDefault();
-    await close();
+    // 隐藏键走的是「收起」那条路，和全局快捷键一模一样：只把窗口藏起来，
+    // 不写进度也不刷书架。书、章、读到第几屏都还在窗口自己这里，
+    // 再呼出来还是刚才那一屏。从前这里走 `close`（收尾上报 + 刷书架），
+    // 结果就是读者按 Esc 要等联网那一下，窗口才有反应
+    await hide();
     return;
   }
   if (matchSpec(keyNext.value, event)) {
@@ -854,13 +879,19 @@ async function persistSize() {
 }
 
 function applyStyle(cfg = {}) {
-  bg.value = cfg.readBg || bg.value;
-  fg.value = cfg.readFg || fg.value;
-  fontSize.value = cfg.readFontSize || fontSize.value;
-  fontFamily.value = cfg.readFontFamily || fontFamily.value;
-  fontWeight.value = cfg.readFontWeight || fontWeight.value;
-  letterSpacing.value = cfg.readLetterSpacing ?? letterSpacing.value;
-  lineHeightFactor.value = cfg.readLineHeight || lineHeightFactor.value;
+  // 样式来自「正在用的那一套字体主题」：后端把主题摊平成 readXxx 一起交过来，
+  // 老配置那份散着的样式也走同一条路。主题摊平不出来时才回到手上这份
+  const theme = cfg.themes?.length
+    ? cfg.themes.find((t) => t.id === cfg.readThemeId) ?? cfg.themes[0]
+    : null;
+  const style = theme ? { ...cfg, ...themePatch(theme) } : cfg;
+  bg.value = style.readBg || bg.value;
+  fg.value = style.readFg || fg.value;
+  fontSize.value = style.readFontSize || fontSize.value;
+  fontFamily.value = style.readFontFamily || fontFamily.value;
+  fontWeight.value = style.readFontWeight || fontWeight.value;
+  letterSpacing.value = style.readLetterSpacing ?? letterSpacing.value;
+  lineHeightFactor.value = style.readLineHeight || lineHeightFactor.value;
   // 三个阅读快捷键：旧配置里没有（`undefined`）就按默认走，别变成空串
   keyHide.value = cfg.keyHide || keyHide.value;
   keyNext.value = cfg.keyNext || keyNext.value;
@@ -907,6 +938,8 @@ onMounted(async () => {
     const prevH = rawHeight.value;
     syncBodySize();
     if (prevW === bodyWidth.value && prevH === rawHeight.value) return;
+    // 宽度也得当真：撑宽一点就会少折一行，整章的行数跟着变，
+    // 不重排的话分页表还停在旧宽度上（字距又把这一点放大）
     rebuild();
     schedulePersist();
   });
@@ -1017,7 +1050,7 @@ watch(
     </footer>
 
     <!-- 量高度用的探针：不可见，只为拿浏览器排版出来的真实高度 -->
-    <p ref="probeEl" class="probe" aria-hidden="true" />
+    <p ref="probeEl" class="probe" :style="probeStyle" aria-hidden="true" />
 
     <!-- 取内容时的遮罩：翻章要联网取下一章，等的那一段不能看着像按了没反应 -->
     <div v-if="loading" class="loading" role="status" aria-live="polite">
