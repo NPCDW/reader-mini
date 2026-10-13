@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, onUnmounted, reactive, ref } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
 import {
   call,
   getBookshelf,
@@ -17,6 +17,7 @@ import {
 } from "./bridge";
 import SettingsPage from "./components/SettingsPage.vue";
 import { continueIndex, findBook } from "./bookshelf";
+import { migrate } from "./theme";
 
 const tab = ref("shelf");
 const page = ref("books");
@@ -36,6 +37,8 @@ const openingUrl = ref("");
 const status = ref("");
 
 const config = ref(null);
+/** 设置页实例：顶栏那颗「保存」要能叫它交作业（见 `saveFromTopbar`） */
+const settingsRef = ref(null);
 /** 设置保存后递增，让已开着的阅读窗口重新读一遍样式 */
 const styleTick = ref(0);
 /** 阅读窗口最近一次回传的位置，收起 / 退出时用它把进度收干净 */
@@ -55,10 +58,17 @@ let stopFailed = null;
 // 与 Rust 侧 Config::default() 同一套默认值
 const DEFAULT_CONFIG = {
   baseUrl: "http://127.0.0.1:1122",
+  themes: [],
+  readThemeId: "",
   readBg: "#181818",
   readFg: "#bdbdbd",
   readFontSize: 20,
+  readFontFamily: "system-ui",
+  readFontWeight: "normal",
   readLineHeight: 1.5,
+  keyHide: "Esc",
+  keyNext: "PgDn",
+  keyPrev: "PgUp",
   hotkey: "Alt+PgDn",
   readerWidth: 460,
   readerHeight: 560,
@@ -66,9 +76,23 @@ const DEFAULT_CONFIG = {
   closeOnBlur: false,
 };
 
+/** 版本号：侧栏底下那一行小字，跟 `package.json` / `tauri.conf.json` 同一个数 */
+const version = "0.6.4";
+
+/** 设置页里那份表单有没有改过：顶栏的「保存」据此决定亮不亮 */
+const dirty = ref(false);
+
+/** 当前目录属于哪本书（目录页标题旁那行小字） */
+const currentBookName = computed(
+  () => findBook(books.value, currentBookUrl.value)?.name ?? "",
+);
+
 async function bootstrap() {
   try {
-    config.value = { ...DEFAULT_CONFIG, ...(await getConfig()) };
+    const raw = { ...DEFAULT_CONFIG, ...(await getConfig()) };
+    // 旧配置里那些散着的 readXxx 到这里才变成「默认主题」
+    const { themes, id } = migrate(raw);
+    config.value = { ...raw, themes, readThemeId: id };
   } catch {
     config.value = { ...DEFAULT_CONFIG };
   }
@@ -227,10 +251,14 @@ async function handleToggle(name) {
 
 async function saveSettings(next) {
   try {
-    config.value = {
+    const saved = {
       ...DEFAULT_CONFIG,
       ...(await saveConfig({ ...config.value, ...next })),
     };
+    // 后端会把主题整理一遍（补 id / 补名字 / 选中项兜底），照它回来的那份为准
+    const { themes, id } = migrate(saved);
+    config.value = { ...saved, themes, readThemeId: id };
+    dirty.value = false;
     // 背景色 / 字色 / 字号 / 行高改了，已经开着的阅读窗口也得换上新样式：
     // 递增标记 + 重新呼出一次，阅读窗口收到就原地重排
     styleTick.value += 1;
@@ -242,6 +270,16 @@ async function saveSettings(next) {
     status.value = msg;
     return msg;
   }
+}
+
+/**
+ * 顶栏那颗「保存」：让设置页走它自己那一套校验（颜色、快捷键冲突），
+ * 校验过了再交给 `saveSettings`。校验没过就把那句话留在状态栏 ——
+ * 顶栏离设置页远，光在那儿标红读者看不见。
+ */
+async function saveFromTopbar() {
+  const message = await settingsRef.value?.submit();
+  if (message) status.value = message;
 }
 
 onMounted(async () => {
@@ -284,148 +322,339 @@ onUnmounted(() => {
 
 <template>
   <div class="shell">
-    <header class="tabs">
-      <button :class="['tab', { on: tab === 'shelf' }]" @click="tab = 'shelf'">
-        书架
-      </button>
-      <button
-        :class="['tab', { on: tab === 'settings' }]"
-        @click="tab = 'settings'"
-      >
-        设置
-      </button>
-      <span class="spacer" />
-      <button class="tab ghost" :disabled="loading" @click="refresh()">
-        {{ loading ? "加载中…" : "刷新" }}
-      </button>
-    </header>
-
-    <main v-if="tab === 'shelf'" class="shelf">
-      <template v-if="page === 'books'">
-        <article
-          v-for="(book, i) in books"
-          :key="book.bookUrl || i"
-          class="book"
+    <aside class="rail">
+      <div class="brand">
+        <span class="mark" aria-hidden="true">📖</span>
+        <span class="name">reader-mini</span>
+      </div>
+      <nav class="nav">
+        <button
+          :class="['nav-item', { on: tab === 'shelf' }]"
+          @click="tab = 'shelf'"
         >
-          <div class="info">
-            <h3>{{ book.name }}</h3>
-            <p class="meta">
-              {{ book.author }} · 最新 {{ book.latestChapterTitle }}
-            </p>
-            <p class="progress">
-              读至 {{ book.durChapterIndex }} 章 · {{ book.durChapterTitle }}
-            </p>
-            <p class="intro">{{ book.intro }}</p>
-          </div>
-          <div class="actions">
-            <button
-              class="primary"
-              :disabled="openingUrl !== ''"
-              @click="read(i)"
-            >
-              <span
-                v-if="openingUrl === book.bookUrl"
-                class="spinner"
-                aria-hidden="true"
-              />
-              {{ openingUrl === book.bookUrl ? "加载中…" : "阅读" }}
-            </button>
-            <button class="plain" @click="openToc(i)">目录</button>
-          </div>
-        </article>
-        <p v-if="!books.length" class="empty">
-          {{
-            loading
-              ? "正在获取书架…"
-              : "书架为空：请先在「设置」里填写 baseUrl，再点刷新"
-          }}
+          <span class="ico" aria-hidden="true">▤</span>
+          <span>书架</span>
+          <span class="badge">{{ books.length }}</span>
+        </button>
+        <button
+          :class="['nav-item', { on: tab === 'settings' }]"
+          @click="tab = 'settings'"
+        >
+          <span class="ico" aria-hidden="true">⚙</span>
+          <span>设置</span>
+        </button>
+      </nav>
+      <div class="rail-foot">
+        <p class="ver">v{{ version }}</p>
+      </div>
+    </aside>
+
+    <div class="body">
+      <header class="topbar">
+        <h1>{{ tab === "shelf" ? "我的书架" : "设置" }}</h1>
+        <p v-if="tab === 'shelf'" class="crumb">
+          {{ page === "books" ? `${books.length} 本书` : currentBookName }}
         </p>
-      </template>
+        <span class="grow" />
+        <!-- 书架的右上角：刷新书架；设置的右上角：保存 -->
+        <button
+          v-if="tab === 'shelf'"
+          class="top-action"
+          :disabled="loading"
+          @click="refresh()"
+        >
+          {{ loading ? "刷新中…" : "刷新书架" }}
+        </button>
+        <button
+          v-else
+          class="top-action primary"
+          :class="{ armed: dirty }"
+          @click="saveFromTopbar"
+        >
+          保存
+        </button>
+      </header>
 
-      <template v-else>
-        <div class="toc-head">
-          <button class="plain" @click="page = 'books'">← 返回</button>
-          <strong>目录</strong>
-        </div>
-        <ul class="toc">
-          <li v-for="(ch, i) in chapters" :key="i" @click="openChapter(i)">
-            {{ ch.title }}
-          </li>
-        </ul>
-        <p v-if="!chapters.length" class="empty">暂无目录</p>
-      </template>
-    </main>
+      <main v-if="tab === 'shelf'" class="content">
+        <template v-if="page === 'books'">
+          <article v-for="(book, i) in books" :key="book.bookUrl || i" class="book">
+            <div class="cover" aria-hidden="true">
+              {{ (book.name || "?").slice(0, 1) }}
+            </div>
+            <div class="info">
+              <h3>{{ book.name }}</h3>
+              <p class="meta">{{ book.author }}</p>
+              <p class="progress">
+                <span>读至 {{ book.durChapterIndex }} 章</span>
+                <span class="sep">·</span>
+                <span class="ell">{{ book.durChapterTitle }}</span>
+              </p>
+              <p class="intro">{{ book.intro }}</p>
+            </div>
+            <div class="ops">
+              <button
+                class="primary"
+                :disabled="openingUrl !== ''"
+                @click="read(i)"
+              >
+                <span
+                  v-if="openingUrl === book.bookUrl"
+                  class="spinner"
+                  aria-hidden="true"
+                />
+                {{ openingUrl === book.bookUrl ? "加载中…" : "阅读" }}
+              </button>
+              <button class="plain" @click="openToc(i)">目录</button>
+            </div>
+          </article>
+          <p v-if="!books.length" class="empty">
+            {{
+              loading
+                ? "正在获取书架…"
+                : "书架为空：请先在「设置」里填写 baseUrl，再刷新"
+            }}
+          </p>
+        </template>
 
-    <SettingsPage v-else :config="config" :on-save="saveSettings" />
+        <template v-else>
+          <div class="toc-head">
+            <button class="plain" @click="page = 'books'">← 返回书架</button>
+            <strong>目录</strong>
+            <span class="grow" />
+            <span class="crumb">{{ chapters.length }} 章</span>
+          </div>
+          <ul class="toc">
+            <li v-for="(ch, i) in chapters" :key="i" @click="openChapter(i)">
+              <span class="no">{{ i + 1 }}</span>
+              <span class="t">{{ ch.title }}</span>
+            </li>
+          </ul>
+          <p v-if="!chapters.length" class="empty">暂无目录</p>
+        </template>
+      </main>
 
-    <footer class="status">{{ status }}</footer>
+      <SettingsPage
+        v-else
+        ref="settingsRef"
+        :config="config"
+        :on-save="saveSettings"
+        @dirty="dirty = $event"
+      />
+
+      <footer class="statusbar">
+        <span :class="['status', { busy: loading }]">{{ status || "就绪" }}</span>
+      </footer>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .shell {
   display: flex;
-  flex-direction: column;
   height: 100%;
+  /* 主窗口是两栏：左边窄导航，右边内容。整窗不滚，只有内容区滚 */
+  overflow: hidden;
 }
 
-.tabs {
+/* ---- 左侧导航栏 ---- */
+.rail {
   display: flex;
-  gap: 6px;
-  padding: 6px;
+  flex-direction: column;
+  flex: 0 0 200px;
+  padding: 16px 12px;
+  background: #1a1c21;
+  border-right: 1px solid #2b2f37;
+}
+
+.brand {
+  display: flex;
   align-items: center;
+  gap: 8px;
+  padding: 0 6px 16px;
 }
 
-.tab {
-  width: 88px;
-  height: 36px;
+.mark {
+  font-size: 18px;
+}
+
+.name {
+  font-size: 15px;
+  font-weight: 600;
+  color: #e9ebee;
+  letter-spacing: 0.02em;
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 38px;
+  padding: 0 10px;
   border: none;
-  border-radius: 6px;
-  background: #2a2d34;
-  color: #c9cdd4;
-  cursor: pointer;
+  border-radius: 8px;
+  background: transparent;
+  color: #a2a9b4;
+  font: inherit;
   font-size: 14px;
+  cursor: pointer;
+  text-align: left;
 }
 
-.tab:hover:not(:disabled) {
-  background: #33373f;
+.nav-item:hover {
+  background: #22252b;
+  color: #d6d9de;
 }
 
-.tab:disabled {
-  opacity: 0.5;
+.nav-item.on {
+  background: #2b3a52;
+  color: #fff;
+}
+
+.ico {
+  width: 18px;
+  text-align: center;
+  opacity: 0.8;
+}
+
+.badge {
+  margin-left: auto;
+  padding: 0 6px;
+  height: 18px;
+  line-height: 18px;
+  border-radius: 9px;
+  background: #2a2d34;
+  color: #838994;
+  font-size: 11px;
+}
+
+.nav-item.on .badge {
+  background: #3d5a80;
+  color: #dbe7f5;
+}
+
+.rail-foot {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ver {
+  margin: 0;
+  padding-left: 2px;
+  font-size: 11px;
+  color: #5d626d;
+}
+
+/* ---- 右侧内容 ---- */
+.body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+.topbar {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid #24272d;
+}
+
+.topbar h1 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: #e9ebee;
+}
+
+.crumb {
+  margin: 0;
+  font-size: 12px;
+  color: #6f757f;
+}
+
+.grow {
+  flex: 1;
+}
+
+/* 右上角那一颗：书架上是「刷新书架」，设置里是「保存」 */
+.top-action {
+  align-self: center;
+  height: 30px;
+  padding: 0 14px;
+  border: 1px solid #33383f;
+  border-radius: 7px;
+  background: #212429;
+  color: #c9cdd4;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.top-action:hover:not(:disabled) {
+  filter: brightness(1.18);
+}
+
+.top-action:disabled {
+  opacity: 0.6;
   cursor: default;
 }
 
-.tab.on {
+.top-action.primary {
+  border-color: transparent;
   background: #4a6fa5;
   color: #fff;
 }
 
-.tab.ghost {
-  margin-left: auto;
+/* 表单改过：这颗「保存」才亮起来，读者一眼看得出还有没落地的改动 */
+.top-action.primary.armed {
+  box-shadow: 0 0 0 2px rgba(74, 111, 165, 0.35);
 }
 
-.spacer {
+.content {
   flex: 1;
-}
-
-.shelf {
-  flex: 1;
-  /* flex 项默认不肯矮过内容（`min-height: auto`），不给 0 就会把外壳顶高，
-     外面那条滚动条就是它顶出来的 */
   min-height: 0;
   overflow-y: auto;
-  padding: 10px;
+  padding: 16px 20px;
 }
 
+/* ---- 书架卡片 ---- */
 .book {
   display: flex;
-  gap: 10px;
-  padding: 10px;
-  margin-bottom: 8px;
-  background: #212429;
-  border: 1px solid #2f333a;
-  border-radius: 8px;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 14px;
+  margin-bottom: 10px;
+  background: #1e2026;
+  border: 1px solid #2b2f37;
+  border-radius: 10px;
+  transition: border-color 0.15s ease;
+}
+
+.book:hover {
+  border-color: #3d5a80;
+}
+
+/* 书名首字当封面：没有封面图，一个字比空白像个书 */
+.cover {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 44px;
+  height: 58px;
+  border-radius: 6px;
+  background: linear-gradient(160deg, #3d5a80, #2b3a52);
+  color: #dbe7f5;
+  font-size: 22px;
+  font-weight: 600;
 }
 
 .info {
@@ -435,15 +664,15 @@ onUnmounted(() => {
 
 .info h3 {
   margin: 0;
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 600;
   color: #e9ebee;
 }
 
 .meta,
-.intro,
-.progress {
-  margin: 2px 0 0;
+.progress,
+.intro {
+  margin: 4px 0 0;
   font-size: 12px;
 }
 
@@ -452,7 +681,20 @@ onUnmounted(() => {
 }
 
 .progress {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   color: #7ea6dd;
+}
+
+.sep {
+  color: #4a4e57;
+}
+
+.ell {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .intro {
@@ -463,20 +705,21 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-.actions {
+.ops {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  width: 130px;
+  width: 96px;
+  flex: 0 0 auto;
 }
 
 button.primary,
 button.plain {
-  height: 34px;
+  height: 32px;
   border: none;
   border-radius: 6px;
   cursor: pointer;
-  font-size: 14px;
+  font-size: 13px;
 }
 
 button.primary {
@@ -519,16 +762,32 @@ button.primary .spinner {
   }
 }
 
+/* ---- 目录 ---- */
 .toc-head {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 8px;
+  margin-bottom: 12px;
 }
 
 .toc-head button {
-  width: 88px;
-  height: 32px;
+  width: 100px;
+  height: 30px;
+  border: none;
+  border-radius: 6px;
+  background: #2a2d34;
+  color: #c9cdd4;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.toc-head button:hover {
+  filter: brightness(1.15);
+}
+
+.toc-head strong {
+  color: #e9ebee;
 }
 
 .toc {
@@ -538,28 +797,60 @@ button.primary .spinner {
 }
 
 .toc li {
-  padding: 9px 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
   margin-bottom: 4px;
-  background: #212429;
+  background: #1e2026;
   border-radius: 6px;
   cursor: pointer;
+  font-size: 13px;
+  color: #c9cdd4;
 }
 
 .toc li:hover {
   background: #2b3037;
+  color: #e9ebee;
+}
+
+.toc .no {
+  flex: 0 0 28px;
+  color: #5d626d;
+  font-size: 11px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.toc .t {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .empty {
+  padding: 48px 0;
   text-align: center;
   color: #767c86;
+  font-size: 13px;
+}
+
+/* ---- 状态栏 ---- */
+.statusbar {
+  display: flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 20px;
+  border-top: 1px solid #24272d;
+  background: #1a1c21;
 }
 
 .status {
-  height: 26px;
-  line-height: 26px;
-  padding: 0 10px;
-  color: #7ea6dd;
   font-size: 12px;
-  border-top: 1px solid #2f333a;
+  color: #7ea6dd;
+}
+
+.status.busy {
+  color: #d8b46a;
 }
 </style>

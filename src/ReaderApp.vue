@@ -12,6 +12,8 @@ import {
   switchChapter,
   takePending,
 } from "./bridge";
+import { matchSpec } from "./keys";
+import { themePatch } from "./theme";
 import {
   clipHeight,
   lineHeightOf,
@@ -66,7 +68,13 @@ const LOADING_HINT_MS = 150;
 const bg = ref("#181818");
 const fg = ref("#bdbdbd");
 const fontSize = ref(20);
+const fontFamily = ref("system-ui");
+const fontWeight = ref("normal");
 const lineHeightFactor = ref(1.5);
+/** 阅读窗口内的三个快捷键（配置串）：隐藏窗口 / 下一页 / 上一页 */
+const keyHide = ref("Esc");
+const keyNext = ref("PgDn");
+const keyPrev = ref("PgUp");
 /** 失焦即收起。这是配置项，默认关 —— 点一下别处窗口就没了太容易误伤 */
 const closeOnBlur = ref(false);
 
@@ -135,6 +143,19 @@ const textEl = ref(null);
 const tailEl = ref(null);
 /** 量高度用的探针，不可见 */
 const probeEl = ref(null);
+/**
+ * 探针的排版：与正文逐项对齐（同宽、同字号、同行高）。
+ *
+ * 由这里绑定给出（脚本那边只管 `syncProbe` 的宽高换算）—— 字重、字体这些
+ * 只要探针和正文差一点，量出来的行数与行高就跟着差，而分页正是照探针量的。
+ */
+const probeStyle = computed(() => ({
+  width: `${bodyWidth.value - SIDE_PAD * 2}px`,
+  fontSize: `${fontSize.value}px`,
+  fontFamily: fontFamily.value,
+  fontWeight: fontWeight.value,
+  lineHeight: String(lineHeightFactor.value),
+}));
 
 const bodyWidth = ref(0);
 /** 滚动容器能拿到的可视高度（原始值，随时可能变） */
@@ -307,12 +328,20 @@ function estimatedRowChars(count) {
   );
 }
 
-/** 探针调到与正文一模一样的排版：同宽、同字号、同行高 */
+/**
+ * 探针调到与正文一模一样的排版：同宽、同字号、同行高。
+ *
+ * 排版由 `probeStyle` 绑定、这里补上宽度（宽度要开窗后才量得到）：
+ * 字体、字重只要探针和正文差一点，量出来的行数就跟着差 ——
+ * 而分页正是按探针量的（见 `measuredRows`）。
+ */
 function syncProbe() {
   const el = probeEl.value;
   if (!el) return;
-  el.style.width = `${Math.max(bodyWidth.value - SIDE_PAD * 2, 80)}px`;
+  el.style.width = `${bodyWidth.value - SIDE_PAD * 2}px`;
   el.style.fontSize = `${fontSize.value}px`;
+  el.style.fontFamily = fontFamily.value;
+  el.style.fontWeight = fontWeight.value;
   el.style.lineHeight = String(lineHeightFactor.value);
 }
 
@@ -725,24 +754,58 @@ watch(
   { immediate: true },
 );
 
+/**
+ * 阅读窗口的键盘：只放行配置里的那三个，其余一概吃掉。
+ *
+ * 带修饰键的组合（默认 Alt+PgDn 就是那个呼出 / 收起的全局快捷键）也不在这里动：
+ * 它由后端的全局快捷键统一开关接管。这里再处理一次的话，同一次按键会走两条路 ——
+ * 一条把窗口收起，另一条看见窗口已经收起又把它呼出来，就成了「关掉又自己打开」。
+ *
+ * 其余的键（Home / End / 方向键 / 快捷键 / F1…）连同浏览器默认行为一起
+ * `preventDefault` 掉：这是个无边框阅读窗口，不该有别的动作从里面冒出去。
+ */
 async function onKeydown(event) {
-  // 带修饰键的组合（默认 Alt+PgDn 就是那个呼出 / 收起的全局快捷键）不在这里动：
-  // 它由后端的全局快捷键统一开关接管。这里再处理一次的话，同一次按键会走两条路 ——
-  // 一条把窗口收起，另一条看见窗口已经收起又把它呼出来，就成了「关掉又自己打开」。
-  if (event.ctrlKey || event.altKey || event.metaKey) return;
-  const handled = {
-    PageDown: () => step(1),
-    PageUp: () => step(-1),
-    Escape: () => close(),
-    Home: () => {
-      gotoPage(0);
-      return Promise.resolve();
-    },
-    End: () => step(1),
-  }[event.key];
-  if (!handled) return;
+  if (event.ctrlKey || event.altKey || event.metaKey) {
+    event.preventDefault();
+    return;
+  }
+  if (matchSpec(keyHide.value, event)) {
+    event.preventDefault();
+    // 隐藏键走的是「收起」那条路，和全局快捷键一模一样：只把窗口藏起来，
+    // 不写进度也不刷书架。书、章、读到第几屏都还在窗口自己这里，
+    // 再呼出来还是刚才那一屏。从前这里走 `close`（收尾上报 + 刷书架），
+    // 结果就是读者按 Esc 要等联网那一下，窗口才有反应
+    await hide();
+    return;
+  }
+  if (matchSpec(keyNext.value, event)) {
+    event.preventDefault();
+    await step(1);
+    return;
+  }
+  if (matchSpec(keyPrev.value, event)) {
+    event.preventDefault();
+    await step(-1);
+    return;
+  }
+  // 不认识的键：屏蔽掉，别让它的默认行为在阅读窗口里冒出来
   event.preventDefault();
-  await handled();
+}
+
+/**
+ * 鼠标滚轮与右键也一律屏蔽：读者要的只有「翻页」这一个动作。
+ *
+ * 右键连菜单都不该弹 —— 阅读窗口不是网页，右键菜单在里面没有任何用处。
+ * 左键留着：标题条要靠它拖动，右下角要靠它拉伸窗口。
+ */
+function onMouseGesture(event) {
+  if (event.type === "wheel" || event.button === 2) {
+    event.preventDefault();
+  }
+}
+
+function onContextMenu(event) {
+  event.preventDefault();
 }
 
 // ---- 拖动：按住顶部标题条把窗口挪走 ----
@@ -813,10 +876,22 @@ async function persistSize() {
 }
 
 function applyStyle(cfg = {}) {
-  bg.value = cfg.readBg || bg.value;
-  fg.value = cfg.readFg || fg.value;
-  fontSize.value = cfg.readFontSize || fontSize.value;
-  lineHeightFactor.value = cfg.readLineHeight || lineHeightFactor.value;
+  // 样式来自「正在用的那一套字体主题」：后端把主题摊平成 readXxx 一起交过来，
+  // 老配置那份散着的样式也走同一条路。主题摊平不出来时才回到手上这份
+  const theme = cfg.themes?.length
+    ? cfg.themes.find((t) => t.id === cfg.readThemeId) ?? cfg.themes[0]
+    : null;
+  const style = theme ? { ...cfg, ...themePatch(theme) } : cfg;
+  bg.value = style.readBg || bg.value;
+  fg.value = style.readFg || fg.value;
+  fontSize.value = style.readFontSize || fontSize.value;
+  fontFamily.value = style.readFontFamily || fontFamily.value;
+  fontWeight.value = style.readFontWeight || fontWeight.value;
+  lineHeightFactor.value = style.readLineHeight || lineHeightFactor.value;
+  // 三个阅读快捷键：旧配置里没有（`undefined`）就按默认走，别变成空串
+  keyHide.value = cfg.keyHide || keyHide.value;
+  keyNext.value = cfg.keyNext || keyNext.value;
+  keyPrev.value = cfg.keyPrev || keyPrev.value;
   // 旧配置里没有这一项（`undefined`）：按默认关掉，别让它变成真
   closeOnBlur.value = cfg.closeOnBlur === true;
 }
@@ -859,6 +934,8 @@ onMounted(async () => {
     const prevH = rawHeight.value;
     syncBodySize();
     if (prevW === bodyWidth.value && prevH === rawHeight.value) return;
+    // 宽度也得当真：撑宽一点就会少折一行，整章的行数跟着变，
+    // 不重排的话分页表还停在旧宽度上
     rebuild();
     schedulePersist();
   });
@@ -882,6 +959,9 @@ onMounted(async () => {
   await persistSize();
   window.addEventListener("keydown", onKeydown);
   window.addEventListener("mouseup", onDragEnd);
+  window.addEventListener("wheel", onMouseGesture, { passive: false });
+  window.addEventListener("contextmenu", onContextMenu);
+  window.addEventListener("mousedown", onMouseGesture, { capture: true });
   window.addEventListener("resize", onWindowResize);
   for (const type of MOUSE_TYPES) {
     window.addEventListener(type, noteButtons, { capture: true });
@@ -909,8 +989,9 @@ onUnmounted(() => {
   if (loadingTimer) clearTimeout(loadingTimer);
 });
 
-// 字号与行高倍数直接决定行高与整章行数，变了必须重排；颜色只走 CSS 变量，不用动排版
-watch([fontSize, lineHeightFactor], () => {
+// 字号、行高、字重、字体直接决定行高与整章行数，变了必须重排；
+// 颜色只走 CSS 变量，不用动排版
+watch([fontSize, lineHeightFactor, fontWeight, fontFamily], () => {
   nextTick(() => rebuild());
 });
 
@@ -944,7 +1025,12 @@ watch(
     <div
       ref="scrollerEl"
       class="body"
-      :style="{ '--fs': `${fontSize}px`, '--lh': lineHeightFactor }"
+      :style="{
+        '--fs': `${fontSize}px`,
+        '--lh': lineHeightFactor,
+        '--ff': fontFamily,
+        '--fw': fontWeight,
+      }"
     >
       <p ref="textEl" class="text">{{ text }}</p>
       <!-- 正文末尾的留白：高度由脚本垫出来，里面没有内容，不参与正文排版 -->
@@ -952,14 +1038,14 @@ watch(
     </div>
 
     <footer ref="footEl" class="foot">
-      <button @click="step(-1)">PgUp</button>
-      <button @click="step(1)">PgDn</button>
+      <button @click="step(-1)">{{ keyPrev }}</button>
+      <button @click="step(1)">{{ keyNext }}</button>
       <span class="spacer" />
       <span class="info">{{ pageInfo }}</span>
     </footer>
 
     <!-- 量高度用的探针：不可见，只为拿浏览器排版出来的真实高度 -->
-    <p ref="probeEl" class="probe" aria-hidden="true" />
+    <p ref="probeEl" class="probe" :style="probeStyle" aria-hidden="true" />
 
     <!-- 取内容时的遮罩：翻章要联网取下一章，等的那一段不能看着像按了没反应 -->
     <div v-if="loading" class="loading" role="status" aria-live="polite">
@@ -1033,6 +1119,8 @@ watch(
   margin: 0;
   font-size: var(--fs, 20px);
   line-height: var(--lh, 1.5);
+  font-family: var(--ff, "Microsoft YaHei", "PingFang SC", sans-serif);
+  font-weight: var(--fw, normal);
   white-space: pre-wrap;
   word-break: break-word;
 }
