@@ -65,7 +65,6 @@ const DEFAULT_CONFIG = {
   readFontSize: 20,
   readFontFamily: "system-ui",
   readFontWeight: "normal",
-  readLetterSpacing: "0",
   readLineHeight: 1.5,
   keyHide: "Esc",
   keyNext: "PgDn",
@@ -274,7 +273,7 @@ async function saveSettings(next) {
 }
 
 /**
- * 顶栏那颗「保存」：让设置页走它自己那一套校验（颜色、字距、快捷键冲突），
+ * 顶栏那颗「保存」：让设置页走它自己那一套校验（颜色、快捷键冲突），
  * 校验过了再交给 `saveSettings`。校验没过就把那句话留在状态栏 ——
  * 顶栏离设置页远，光在那儿标红读者看不见。
  */

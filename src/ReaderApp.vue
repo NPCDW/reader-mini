@@ -70,7 +70,6 @@ const fg = ref("#bdbdbd");
 const fontSize = ref(20);
 const fontFamily = ref("system-ui");
 const fontWeight = ref("normal");
-const letterSpacing = ref("0");
 const lineHeightFactor = ref(1.5);
 /** 阅读窗口内的三个快捷键（配置串）：隐藏窗口 / 下一页 / 上一页 */
 const keyHide = ref("Esc");
@@ -145,9 +144,9 @@ const tailEl = ref(null);
 /** 量高度用的探针，不可见 */
 const probeEl = ref(null);
 /**
- * 探针的排版：与正文逐项对齐（同宽、同字号、同字距、同行高）。
+ * 探针的排版：与正文逐项对齐（同宽、同字号、同行高）。
  *
- * 由这里绑定给出（脚本那边只管 `syncProbe` 的宽高换算）—— 字距、字重这些
+ * 由这里绑定给出（脚本那边只管 `syncProbe` 的宽高换算）—— 字重、字体这些
  * 只要探针和正文差一点，量出来的行数与行高就跟着差，而分页正是照探针量的。
  */
 const probeStyle = computed(() => ({
@@ -155,7 +154,6 @@ const probeStyle = computed(() => ({
   fontSize: `${fontSize.value}px`,
   fontFamily: fontFamily.value,
   fontWeight: fontWeight.value,
-  letterSpacing: letterSpacing.value,
   lineHeight: String(lineHeightFactor.value),
 }));
 
@@ -331,10 +329,10 @@ function estimatedRowChars(count) {
 }
 
 /**
- * 探针调到与正文一模一样的排版：同宽、同字号、同字距、同行高。
+ * 探针调到与正文一模一样的排版：同宽、同字号、同行高。
  *
  * 排版由 `probeStyle` 绑定、这里补上宽度（宽度要开窗后才量得到）：
- * 字距这种东西只要探针和正文差一点，量出来的行数就跟着差 ——
+ * 字体、字重只要探针和正文差一点，量出来的行数就跟着差 ——
  * 而分页正是按探针量的（见 `measuredRows`）。
  */
 function syncProbe() {
@@ -344,7 +342,6 @@ function syncProbe() {
   el.style.fontSize = `${fontSize.value}px`;
   el.style.fontFamily = fontFamily.value;
   el.style.fontWeight = fontWeight.value;
-  el.style.letterSpacing = letterSpacing.value;
   el.style.lineHeight = String(lineHeightFactor.value);
 }
 
@@ -890,7 +887,6 @@ function applyStyle(cfg = {}) {
   fontSize.value = style.readFontSize || fontSize.value;
   fontFamily.value = style.readFontFamily || fontFamily.value;
   fontWeight.value = style.readFontWeight || fontWeight.value;
-  letterSpacing.value = style.readLetterSpacing ?? letterSpacing.value;
   lineHeightFactor.value = style.readLineHeight || lineHeightFactor.value;
   // 三个阅读快捷键：旧配置里没有（`undefined`）就按默认走，别变成空串
   keyHide.value = cfg.keyHide || keyHide.value;
@@ -939,7 +935,7 @@ onMounted(async () => {
     syncBodySize();
     if (prevW === bodyWidth.value && prevH === rawHeight.value) return;
     // 宽度也得当真：撑宽一点就会少折一行，整章的行数跟着变，
-    // 不重排的话分页表还停在旧宽度上（字距又把这一点放大）
+    // 不重排的话分页表还停在旧宽度上
     rebuild();
     schedulePersist();
   });
@@ -993,9 +989,9 @@ onUnmounted(() => {
   if (loadingTimer) clearTimeout(loadingTimer);
 });
 
-// 字号、行高、字重、字距直接决定行高与整章行数，变了必须重排；
+// 字号、行高、字重、字体直接决定行高与整章行数，变了必须重排；
 // 颜色只走 CSS 变量，不用动排版
-watch([fontSize, lineHeightFactor, fontWeight, letterSpacing, fontFamily], () => {
+watch([fontSize, lineHeightFactor, fontWeight, fontFamily], () => {
   nextTick(() => rebuild());
 });
 
@@ -1034,7 +1030,6 @@ watch(
         '--lh': lineHeightFactor,
         '--ff': fontFamily,
         '--fw': fontWeight,
-        '--ls': letterSpacing,
       }"
     >
       <p ref="textEl" class="text">{{ text }}</p>
@@ -1126,7 +1121,6 @@ watch(
   line-height: var(--lh, 1.5);
   font-family: var(--ff, "Microsoft YaHei", "PingFang SC", sans-serif);
   font-weight: var(--fw, normal);
-  letter-spacing: var(--ls, 0);
   white-space: pre-wrap;
   word-break: break-word;
 }

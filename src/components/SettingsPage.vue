@@ -1,6 +1,6 @@
 <script setup>
 import { computed, reactive, ref, watch } from "vue";
-import { specFromEvent } from "../keys";
+import { hasModifier, normalizeSpec, specFromEvent } from "../keys";
 import { newThemeId, normalizeTheme, themePatch, THEME_DEFAULTS } from "../theme";
 
 const props = defineProps({
@@ -20,7 +20,6 @@ const DEFAULTS = {
   readFontSize: 20,
   readFontFamily: "system-ui",
   readFontWeight: "normal",
-  readLetterSpacing: "0",
   readLineHeight: 1.5,
   keyHide: "Esc",
   keyNext: "PgDn",
@@ -56,6 +55,8 @@ const themes = ref([]);
 const activeId = ref("");
 const capturing = ref("");
 const hotkeyError = ref("");
+/** 正要删的那一套主题的 id：非空时确认框亮着 */
+const pendingRemoveId = ref("");
 
 /** 正在编辑的那一套；id 指不到人时退回第一套（后端也是这么兜的） */
 const activeTheme = computed(
@@ -104,16 +105,31 @@ function addTheme() {
 }
 
 /**
- * 删除：至少留一套。
+ * 点「删除这个主题」：只是摆出确认框，真正的删在 `confirmRemoveTheme`。
  *
- * 删掉的正好是当前这套时，就近选一套（删的是最后一个就往前一个），
- * 不能让「选中项」空着 —— 阅读窗口要照它排。
+ * 删主题是「点错就没有了」的动作，直接删太容易手滑，先问一句。
+ * 只剩一套时连问都不问 —— 本来就删不了。
  */
-function removeTheme(id) {
+function askRemoveTheme() {
+  if (!activeTheme.value) return;
   if (themes.value.length <= 1) {
     hotkeyError.value = "至少留一套字体主题";
     return;
   }
+  pendingRemoveId.value = activeTheme.value.id;
+}
+
+/** 确认删除：至少留一套。 */
+function confirmRemoveTheme() {
+  const id = pendingRemoveId.value;
+  pendingRemoveId.value = "";
+  if (!id) return;
+  if (themes.value.length <= 1) {
+    hotkeyError.value = "至少留一套字体主题";
+    return;
+  }
+  // 删掉的正好是当前这套时，就近选一套（删的是最后一个就往前一个），
+  // 不能让「选中项」空着 —— 阅读窗口要照它排
   const at = themes.value.findIndex((t) => t.id === id);
   if (at < 0) return;
   themes.value.splice(at, 1);
@@ -123,6 +139,11 @@ function removeTheme(id) {
   hotkeyError.value = "";
   touch();
 }
+
+/** 要删的那一套（确认框里显示它的名字）；空串表示没在确认 */
+const pendingRemoveName = computed(
+  () => themes.value.find((t) => t.id === pendingRemoveId.value)?.name ?? "",
+);
 
 watch(
   () => props.config,
@@ -163,14 +184,14 @@ function captureKey(event, name) {
 
 /** 快捷键至少要有一个修饰键，否则会把整个键盘都吃掉 */
 async function save() {
-  if (!/[+]/.test(form.hotkey)) {
+  if (!hasModifier(form.hotkey)) {
     hotkeyError.value = "全局快捷键需要至少一个修饰键（如 Ctrl / Alt）";
     return;
   }
   // 阅读窗口的三个键只放行裸键：带修饰键的组合会跟全局快捷键撞车
   // （同一次按键走两条路，窗口关掉又自己打开）
   for (const slot of KEY_SLOTS) {
-    if (/[+]/.test(form[slot.name])) {
+    if (hasModifier(form[slot.name])) {
       hotkeyError.value = `阅读快捷键「${slot.label}」不要带修饰键`;
       return;
     }
@@ -205,10 +226,6 @@ async function save() {
       hotkeyError.value = `主题「${name}」的颜色要写成十六进制，如 #181818`;
       return;
     }
-    if (!/^(0|[-+]?\d*\.?\d+(px|em|rem|%)?)$/.test(theme.letterSpacing.trim())) {
-      hotkeyError.value = `主题「${name}」的字距要写成 0、1px 或 0.05em 这样`;
-      return;
-    }
   }
   // 存下去的是整理过的那份：名字去了空白、缺项按默认补齐
   const savedThemes = themes.value.map((t) =>
@@ -225,10 +242,11 @@ async function save() {
     ...themePatch(
       savedThemes.find((t) => t.id === activeId.value) ?? savedThemes[0],
     ),
-    keyHide: form.keyHide.trim() || DEFAULTS.keyHide,
-    keyNext: form.keyNext.trim() || DEFAULTS.keyNext,
-    keyPrev: form.keyPrev.trim() || DEFAULTS.keyPrev,
-    hotkey: form.hotkey,
+    // 存之前统一写法：`Escape` -> `Esc`、字母转大写，落盘的串是规范的那一种
+    keyHide: normalizeSpec(form.keyHide) || DEFAULTS.keyHide,
+    keyNext: normalizeSpec(form.keyNext) || DEFAULTS.keyNext,
+    keyPrev: normalizeSpec(form.keyPrev) || DEFAULTS.keyPrev,
+    hotkey: normalizeSpec(form.hotkey) || DEFAULTS.hotkey,
     closeOnBlur: form.closeOnBlur === true,
   });
   hotkeyError.value = message ? String(message) : "";
@@ -257,7 +275,7 @@ defineExpose({ submit: save });
     <section class="card">
       <h2>字体主题</h2>
       <p class="hint">
-        一套主题就是一套阅读样式：底色、字色、字体、字号、字重、字距、行高。
+        一套主题就是一套阅读样式：底色、字色、字体、字号、字重、行高。
         点圆圈选中它，被选中的那套就是阅读页面的样式；一条圆圈一套，圆圈的底是
         这套的底色，圈里那个「字」用的是这套的字与字色
       </p>
@@ -296,7 +314,7 @@ defineExpose({ submit: save });
           <button
             class="plain danger"
             :disabled="themes.length <= 1"
-            @click="removeTheme(activeTheme.id)"
+            @click="askRemoveTheme"
           >
             删除这个主题
           </button>
@@ -363,16 +381,6 @@ defineExpose({ submit: save });
               </option>
             </select>
           </label>
-          <label class="field">
-            <span>字距</span>
-            <input
-              :value="activeTheme.letterSpacing"
-              type="text"
-              spellcheck="false"
-              placeholder="0、1px、0.05em"
-              @input="updateTheme('letterSpacing', $event.target.value)"
-            />
-          </label>
         </div>
         <p class="preview" :style="{ background: activeTheme.bg, color: activeTheme.fg }">
           <span
@@ -380,7 +388,6 @@ defineExpose({ submit: save });
               fontFamily: activeTheme.fontFamily,
               fontWeight: activeTheme.fontWeight,
               fontSize: `${activeTheme.fontSize}px`,
-              letterSpacing: activeTheme.letterSpacing,
               lineHeight: activeTheme.lineHeight,
             }"
           >
@@ -450,11 +457,25 @@ defineExpose({ submit: save });
 
     <p v-if="hotkeyError" class="error">{{ hotkeyError }}</p>
 
-    <div class="actions">
-      <button class="primary" @click="save">保存设置</button>
-      <button v-if="capturing" class="plain" @click="startCapture('')">
-        取消录制
-      </button>
+    <!-- 保存只留右上角那一颗（App.vue 的顶栏），这里不再放第二颗：
+         同一个动作两处入口，读者总会怀疑它们是不是一样 -->
+    <div v-if="capturing" class="actions">
+      <button class="plain" @click="startCapture('')">取消录制</button>
+    </div>
+
+    <!-- 删除主题的确认框：删掉就没了的动作，先问一句 -->
+    <div v-if="pendingRemoveId" class="mask" @click.self="pendingRemoveId = ''">
+      <div class="dialog" role="alertdialog" aria-modal="true">
+        <h3>删除字体主题</h3>
+        <p>
+          确定删除「{{ pendingRemoveName }}」吗？删掉之后就不在列表里了。
+          这一套的样式设置会跟着没，且不能撤销。
+        </p>
+        <div class="dialog-actions">
+          <button class="plain" @click="pendingRemoveId = ''">取消</button>
+          <button class="plain danger" @click="confirmRemoveTheme">删除</button>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -669,8 +690,7 @@ input[type="checkbox"] {
 }
 
 .capture,
-.plain,
-.primary {
+.plain {
   height: 38px;
   border: 1px solid #3a3f47;
   border-radius: 6px;
@@ -683,8 +703,7 @@ input[type="checkbox"] {
 }
 
 .capture:hover,
-.plain:hover,
-.primary:hover {
+.plain:hover {
   filter: brightness(1.15);
 }
 
@@ -702,14 +721,6 @@ input[type="checkbox"] {
   width: 110px;
   background: #2a2d34;
   border-color: transparent;
-  text-align: center;
-}
-
-.primary {
-  width: 140px;
-  background: #4a6fa5;
-  border-color: transparent;
-  color: #fff;
   text-align: center;
 }
 
@@ -731,5 +742,46 @@ input[type="checkbox"] {
 
 .error {
   color: #e0685a;
+}
+
+.mask {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.dialog {
+  width: min(320px, calc(100% - 48px));
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  background: #1e2026;
+  border: 1px solid #2f333b;
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+
+.dialog h3 {
+  margin: 0;
+  font-size: 14px;
+  color: #dfe3ea;
+}
+
+.dialog p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #8f97a3;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
 }
 </style>

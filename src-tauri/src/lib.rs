@@ -940,12 +940,10 @@ mod tests {
         let mut cfg = Config::default();
         cfg.themes.clear();
         cfg.read_bg = "#202020".into();
-        cfg.read_letter_spacing = "1px".into();
         cfg.normalize();
         assert_eq!(cfg.themes.len(), 1);
         assert_eq!(cfg.themes[0].name, "默认主题");
         assert_eq!(cfg.themes[0].bg, "#202020");
-        assert_eq!(cfg.themes[0].letter_spacing, "1px");
         // 选中项要落在主题里，否则阅读窗口读样式时找不到人
         assert_eq!(cfg.read_theme_id, cfg.themes[0].id);
     }

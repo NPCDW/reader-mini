@@ -1,4 +1,4 @@
-// 字体主题：一套阅读样式（背景 / 字体色 / 字号 / 字体 / 字重 / 字距 / 行高）。
+// 字体主题：一套阅读样式（背景 / 字体色 / 字号 / 字体 / 字重 / 行高）。
 //
 // 设置页里可以存好几套，读者点一下圆圈就换一套；阅读窗口只认被选中的那一套
 // （配置里的 `readThemeId`）。旧配置里没有主题这一项，那些散着的 readBg /
@@ -18,7 +18,6 @@ export const THEME_DEFAULTS = {
   lineHeight: 1.5,
   fontFamily: "system-ui",
   fontWeight: "normal",
-  letterSpacing: "0",
 };
 
 export const DEFAULT_THEME_NAME = "默认主题";
@@ -35,7 +34,6 @@ export function normalizeTheme(raw = {}, fallbackName = DEFAULT_THEME_NAME) {
     lineHeight: Number(raw.lineHeight) > 0 ? Number(raw.lineHeight) : THEME_DEFAULTS.lineHeight,
     fontFamily: String(raw.fontFamily ?? "").trim() || THEME_DEFAULTS.fontFamily,
     fontWeight: String(raw.fontWeight ?? "").trim() || THEME_DEFAULTS.fontWeight,
-    letterSpacing: String(raw.letterSpacing ?? "").trim() || THEME_DEFAULTS.letterSpacing,
   };
 }
 
@@ -50,7 +48,6 @@ export function legacyTheme(config = {}) {
     lineHeight: config.readLineHeight,
     fontFamily: config.readFontFamily,
     fontWeight: config.readFontWeight,
-    letterSpacing: config.readLetterSpacing,
   });
 }
 
@@ -79,6 +76,5 @@ export function themePatch(theme) {
     readLineHeight: theme.lineHeight,
     readFontFamily: theme.fontFamily,
     readFontWeight: theme.fontWeight,
-    readLetterSpacing: theme.letterSpacing,
   };
 }

@@ -10,14 +10,12 @@ test("旧配置：散着的 readXxx 变成默认主题", () => {
     readLineHeight: 1.8,
     readFontFamily: "serif",
     readFontWeight: "bold",
-    readLetterSpacing: "2px",
   });
   assert.equal(themes.length, 1);
   assert.equal(themes[0].id, id, "选中项要落在主题里");
   assert.equal(themes[0].name, "默认主题");
   assert.equal(themes[0].bg, "#123456");
   assert.equal(themes[0].fontSize, 24);
-  assert.equal(themes[0].letterSpacing, "2px");
 });
 
 test("新配置：主题照原样留着，选中项也跟着", () => {
@@ -35,7 +33,6 @@ test("新配置：主题照原样留着，选中项也跟着", () => {
   assert.equal(id, "b");
   // 缺的项按默认补齐，不让阅读窗口读到 undefined
   assert.equal(themes[0].lineHeight, THEME_DEFAULTS.lineHeight);
-  assert.equal(themes[0].letterSpacing, THEME_DEFAULTS.letterSpacing);
 });
 
 test("选中项指向一个已经不在的主题：退回第一个，而不是没有选中", () => {
@@ -61,7 +58,6 @@ test("themePatch：摊平成阅读窗口读的那几个字段", () => {
     lineHeight: 1.7,
     fontFamily: "serif",
     fontWeight: "bold",
-    letterSpacing: "1px",
   });
   assert.deepEqual(patch, {
     readBg: "#111",
@@ -70,6 +66,5 @@ test("themePatch：摊平成阅读窗口读的那几个字段", () => {
     readLineHeight: 1.7,
     readFontFamily: "serif",
     readFontWeight: "bold",
-    readLetterSpacing: "1px",
   });
 });

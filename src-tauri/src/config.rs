@@ -1,4 +1,4 @@
-//! 配置：baseUrl、阅读样式（含字体 / 字重 / 字距）、快捷键、阅读窗口尺寸、失焦是否自动收起。
+//! 配置：baseUrl、阅读样式（含字体 / 字重）、快捷键、阅读窗口尺寸、失焦是否自动收起。
 //!
 //! 落在系统配置目录（`~/.config/reader-mini/config.json`，Windows 在 `%APPDATA%`），
 //! 不进仓库、不进安装包。
@@ -25,8 +25,6 @@ pub struct Theme {
     pub font_family: String,
     /// CSS `font-weight`：100..900 或 normal / bold
     pub font_weight: String,
-    /// CSS `letter-spacing` 的值，如 `0` / `1px` / `0.05em`
-    pub letter_spacing: String,
     /// 行高倍数（相对字号）
     pub line_height: f32,
 }
@@ -41,7 +39,6 @@ impl Default for Theme {
             font_size: 20,
             font_family: "system-ui".into(),
             font_weight: "normal".into(),
-            letter_spacing: "0".into(),
             line_height: 1.5,
         }
     }
@@ -64,8 +61,6 @@ pub struct Config {
     pub read_font_family: String,
     /// 正文字重（CSS `font-weight`：100..900 或 normal / bold）
     pub read_font_weight: String,
-    /// 正文文字间距（CSS `letter-spacing` 的值，如 `0` / `1px` / `0.05em`）
-    pub read_letter_spacing: String,
     /// 正文行高倍数（相对字号）
     pub read_line_height: f32,
     /// 阅读窗口内的三个快捷键：隐藏窗口 / 下一页 / 上一页。
@@ -92,7 +87,6 @@ impl Default for Config {
             read_font_size: 20,
             read_font_family: "system-ui".into(),
             read_font_weight: "normal".into(),
-            read_letter_spacing: "0".into(),
             read_line_height: 1.5,
             key_hide: "Esc".into(),
             key_next: "PgDn".into(),
@@ -139,7 +133,6 @@ impl Config {
                 font_size: self.read_font_size,
                 font_family: self.read_font_family.clone(),
                 font_weight: self.read_font_weight.clone(),
-                letter_spacing: self.read_letter_spacing.clone(),
                 line_height: self.read_line_height,
                 ..Theme::default()
             });
@@ -172,9 +165,6 @@ impl Config {
             }
             if t.font_weight.trim().is_empty() {
                 t.font_weight = Theme::default().font_weight;
-            }
-            if t.letter_spacing.trim().is_empty() {
-                t.letter_spacing = Theme::default().letter_spacing;
             }
         }
         if !self.themes.iter().any(|t| t.id == self.read_theme_id) {
