@@ -17,6 +17,13 @@ import {
 } from "./bridge";
 import SettingsPage from "./components/SettingsPage.vue";
 import { continueIndex, findBook } from "./bookshelf";
+import {
+  coverSrc as cachedCoverSrc,
+  fetchCoverDataUrl,
+  loadCache,
+  pendingCovers,
+  saveCache,
+} from "./cover";
 import { migrate } from "./theme";
 
 const tab = ref("shelf");
@@ -35,6 +42,14 @@ const loading = ref(false);
 /** 正在打开的书的 bookUrl：后端要先联网取正文，这一下不是抬手就有的 */
 const openingUrl = ref("");
 const status = ref("");
+
+/**
+ * 封面缓存：`coverUrl` 取到就存下来，之后不再取（见 `src/cover.js`）。
+ *
+ * 键是 `bookUrl` 不是下标 —— 书架会被远端按阅读时间重排。
+ * 值是可渲染的地址：命中就是本地那份 dataURL，没命中才是远端 `coverUrl`。
+ */
+const coverCache = ref({});
 
 const config = ref(null);
 /** 设置页实例：顶栏那颗「保存」要能叫它交作业（见 `saveFromTopbar`） */
@@ -88,6 +103,7 @@ const currentBookName = computed(
 );
 
 async function bootstrap() {
+  coverCache.value = loadCache();
   try {
     const raw = { ...DEFAULT_CONFIG, ...(await getConfig()) };
     // 旧配置里那些散着的 readXxx 到这里才变成「默认主题」
@@ -111,12 +127,38 @@ async function refresh(quiet = false) {
     const list = await getBookshelf();
     books.value = list;
     await cacheBooks(list);
+    await warmCovers(list);
     if (!quiet) status.value = "书架已更新";
   } catch (e) {
     if (!quiet) status.value = `获取书架失败: ${e}`;
   } finally {
     loading.value = false;
   }
+}
+
+/**
+ * 把还没封面的书补上：取到的写进缓存，之后刷新书架就不再取它。
+ *
+ * 书架接口只给 `coverUrl`（远端图床地址），浏览器得自己拉一次才能显示。
+ * 一张图拉两次是白费流量，图床抽风时还会一排裂图，所以按 `bookUrl` 缓存住。
+ * 抓取失败（图床挂、超时）就当没有封面，回落书名首字，不重试也不报警。
+ */
+async function warmCovers(list) {
+  const todo = pendingCovers(list, coverCache.value);
+  if (!todo.length) return;
+  await Promise.all(
+    todo.map(async ({ bookUrl, coverUrl }) => {
+      const bytes = await fetchCoverDataUrl(coverUrl);
+      if (!bytes) return;
+      coverCache.value = { ...coverCache.value, [bookUrl]: { url: coverUrl, bytes } };
+    }),
+  );
+  saveCache(coverCache.value);
+}
+
+/** 书封面上那个 `<img>` 的 src：命中缓存用本地那份，否则先拿远端地址顶着 */
+function coverSrc(book) {
+  return cachedCoverSrc(book.bookUrl, book.coverUrl, coverCache.value);
 }
 
 /** 打开某本书：带上这本书 + 上次读到的章节与行号 */
@@ -379,7 +421,14 @@ onUnmounted(() => {
         <template v-if="page === 'books'">
           <article v-for="(book, i) in books" :key="book.bookUrl || i" class="book">
             <div class="cover" aria-hidden="true">
-              {{ (book.name || "?").slice(0, 1) }}
+              <img
+                v-if="coverSrc(book)"
+                class="cover-img"
+                :src="coverSrc(book)"
+                :alt="book.name"
+                loading="lazy"
+              />
+              <span v-else>{{ (book.name || "?").slice(0, 1) }}</span>
             </div>
             <div class="info">
               <h3>{{ book.name }}</h3>
@@ -651,10 +700,18 @@ onUnmounted(() => {
   flex: 0 0 44px;
   height: 58px;
   border-radius: 6px;
+  overflow: hidden;
   background: linear-gradient(160deg, #3d5a80, #2b3a52);
   color: #dbe7f5;
   font-size: 22px;
   font-weight: 600;
+}
+
+/* 取到了就铺满这一格；裂图时露出底下的渐变，比一个碎图标体面 */
+.cover-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .info {

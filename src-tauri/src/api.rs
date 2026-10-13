@@ -15,6 +15,9 @@ pub struct Book {
     pub intro: String,
     #[serde(default)]
     pub book_url: String,
+    /// 封面图地址（远端图床）。前端据此拉图并按 `bookUrl` 缓存，见 `src/cover.js`
+    #[serde(default)]
+    pub cover_url: String,
     #[serde(default)]
     pub latest_chapter_title: String,
     #[serde(default)]
@@ -237,6 +240,24 @@ mod tests {
     fn query_is_percent_encoded() {
         let q = encode_query(&[("url", "https://example.org/book/1.htm"), ("index", "7")]);
         assert_eq!(q, "url=https%3A%2F%2Fexample.org%2Fbook%2F1.htm&index=7");
+    }
+
+    /// `coverUrl` 要能透传到前端：书架上的封面全靠它（见 `src/cover.js`）
+    #[test]
+    fn cover_url_survives_the_envelope() {
+        let r = unwrap_resp::<Vec<Book>>(
+            r#"{"data":[{"name":"三体","bookUrl":"x","coverUrl":"https://example.org/c.jpg"}],"errorMsg":"","isSuccess":true}"#,
+        )
+        .unwrap();
+        assert_eq!(r[0].cover_url, "https://example.org/c.jpg");
+    }
+
+    /// 服务端没给封面（老版本 / 没配图）不能把整本书读失败
+    #[test]
+    fn missing_cover_url_is_not_fatal() {
+        let r = unwrap_resp::<Vec<Book>>(r#"{"data":[{"name":"三体","bookUrl":"x"}],"errorMsg":"","isSuccess":true}"#)
+            .unwrap();
+        assert_eq!(r[0].cover_url, "");
     }
 
     #[test]
