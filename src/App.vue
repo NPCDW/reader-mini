@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
 import {
   call,
+  getAppVersion,
   getBookshelf,
   getChapterList,
   cacheBooks,
@@ -76,8 +77,8 @@ const DEFAULT_CONFIG = {
   closeOnBlur: false,
 };
 
-/** 版本号：侧栏底下那一行小字，跟 `package.json` / `tauri.conf.json` 同一个数 */
-const version = "0.6.4";
+/** 版本号：通过 Tauri 接口读取当前应用版本 */
+const version = ref("");
 
 /** 设置页里那份表单有没有改过：顶栏的「保存」据此决定亮不亮 */
 const dirty = ref(false);
@@ -283,6 +284,11 @@ async function saveFromTopbar() {
 }
 
 onMounted(async () => {
+  getAppVersion()
+    .then((value) => {
+      version.value = value;
+    })
+    .catch(() => {});
   await bootstrap();
   // 托盘菜单与全局快捷键的信号都落在同一条队列里。
   // 后端在入队时会发一个 `reader://tick` 提示，但定时轮询才是取走信号的地方 ——
@@ -345,7 +351,7 @@ onUnmounted(() => {
         </button>
       </nav>
       <div class="rail-foot">
-        <p class="ver">v{{ version }}</p>
+        <p v-if="version" class="ver">v{{ version }}</p>
       </div>
     </aside>
 

@@ -20,6 +20,7 @@ export function on(event, handler) {
   return listen(event, handler);
 }
 
+export const getAppVersion = () => call("plugin:app|version");
 export const getConfig = () => call("get_config");
 export const saveConfig = (config) => call("save_config", { config });
 export const getBookshelf = () => call("get_bookshelf");
