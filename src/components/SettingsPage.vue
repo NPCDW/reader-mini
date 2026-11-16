@@ -1,6 +1,6 @@
 <script setup>
 import { computed, reactive, ref, watch } from "vue";
-import { hasModifier, normalizeSpec, specFromEvent } from "../keys";
+import { hasModifier, isSingleKeySpec, keyFromEvent, normalizeSpec, specFromEvent } from "../keys";
 import { newThemeId, normalizeTheme, themePatch, THEME_DEFAULTS } from "../theme";
 
 const props = defineProps({
@@ -54,6 +54,7 @@ const form = reactive({ ...DEFAULTS });
 const themes = ref([]);
 const activeId = ref("");
 const capturing = ref("");
+let captureHeldKey = "";
 const hotkeyError = ref("");
 /** 正要删的那一套主题的 id：非空时确认框亮着 */
 const pendingRemoveId = ref("");
@@ -167,19 +168,34 @@ watch(
   { immediate: true, deep: true },
 );
 
-/** 录制某个槽位：点一下按钮进入录制，之后直接按下组合键即可 */
+/** 点一下进入录制：阅读键只记第一个按键，全局快捷键继续等组合键。 */
 function startCapture(name) {
   capturing.value = name;
+  captureHeldKey = "";
   hotkeyError.value = "";
 }
 
 function captureKey(event, name) {
-  if (capturing.value !== name) return;
+  if (capturing.value !== name) {
+    // 录完后仍按住 Enter / 空格时，别让按钮默认点击把录制重新打开。
+    if (captureHeldKey === (event.code || event.key)) event.preventDefault();
+    return;
+  }
   event.preventDefault();
-  const spec = specFromEvent(event);
-  if (!spec) return; // 只按了修饰键，继续等
+  if (event.repeat) return;
+  const spec = name === "hotkey" ? specFromEvent(event) : keyFromEvent(event);
+  if (!spec) return; // 全局快捷键只按了修饰键，继续等
   form[name] = spec;
   capturing.value = "";
+  captureHeldKey = event.code || event.key;
+  touch();
+}
+
+function releaseCaptureKey(event) {
+  if (captureHeldKey !== (event.code || event.key)) return;
+  // 空格的默认点击在 keyup，keydown 结束录制还不够。
+  event.preventDefault();
+  captureHeldKey = "";
 }
 
 /** 快捷键至少要有一个修饰键，否则会把整个键盘都吃掉 */
@@ -188,16 +204,15 @@ async function save() {
     hotkeyError.value = "全局快捷键需要至少一个修饰键（如 Ctrl / Alt）";
     return;
   }
-  // 阅读窗口的三个键只放行裸键：带修饰键的组合会跟全局快捷键撞车
-  // （同一次按键走两条路，窗口关掉又自己打开）
+  // 修饰键本身也能当阅读键，但不能保存成多个键的组合。
   for (const slot of KEY_SLOTS) {
-    if (hasModifier(form[slot.name])) {
-      hotkeyError.value = `阅读快捷键「${slot.label}」不要带修饰键`;
+    if (!isSingleKeySpec(form[slot.name])) {
+      hotkeyError.value = `阅读快捷键「${slot.label}」只能设置一个按键，请重新录制`;
       return;
     }
   }
-  // 三个键不能重：重了就只有前一个生效，读者按下去看不到预期的动作
-  const picked = KEY_SLOTS.map((s) => form[s.name]).map((v) => String(v).trim());
+  // 三个键不能重：先统一写法，Escape / Esc、a / A 都算同一个键。
+  const picked = KEY_SLOTS.map((s) => normalizeSpec(form[s.name]));
   if (new Set(picked).size !== picked.length) {
     hotkeyError.value = "阅读快捷键三个不能设成同一个键";
     return;
@@ -401,7 +416,8 @@ defineExpose({ submit: save });
       <h2>阅读快捷键</h2>
       <p class="hint">
         阅读窗口只认这三个键，其余按键（含鼠标滚轮和右键）一律屏蔽。
-        不要带修饰键：带修饰键的组合会跟全局快捷键撞车
+        每项只录制一个按键，支持 Ctrl、Shift、Alt、Meta 等控制键，按下后立即结束录制。
+        如果选择了全局快捷键使用的控制键，按组合键时也会先触发这里的动作。
       </p>
       <div class="grid keys">
         <div v-for="slot in KEY_SLOTS" :key="slot.name" class="field">
@@ -410,6 +426,8 @@ defineExpose({ submit: save });
             :class="['capture', { on: capturing === slot.name }]"
             @click="startCapture(slot.name)"
             @keydown="captureKey($event, slot.name)"
+            @keyup="releaseCaptureKey"
+            @blur="captureHeldKey = ''"
           >
             {{
               capturing === slot.name
@@ -429,6 +447,8 @@ defineExpose({ submit: save });
           :class="['capture', { on: capturing === 'hotkey' }]"
           @click="startCapture('hotkey')"
           @keydown="captureKey($event, 'hotkey')"
+          @keyup="releaseCaptureKey"
+          @blur="captureHeldKey = ''"
         >
           {{
             capturing === "hotkey"

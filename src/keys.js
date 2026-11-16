@@ -50,6 +50,12 @@ function nameOf(event) {
   return null;
 }
 
+export function keyFromEvent(event) {
+  if (!event) return null;
+  // 阅读快捷键只记这一次按下的键，Ctrl / Shift 等也能独立录制。
+  return normalizeModifier(event.key ?? "") ?? nameOf(event);
+}
+
 export function specFromEvent(event) {
   // 只按下修饰键不算一次录制，等真正的主键
   if (!event || MODIFIER_KEYS.includes(event.key)) return null;
@@ -93,8 +99,10 @@ function normalizeModifier(part) {
     alt: "Alt",
     option: "Alt",
     shift: "Shift",
+    altgraph: "AltGraph",
     super: "Super",
     meta: "Super",
+    os: "Super",
     win: "Super",
     cmd: "Super",
     command: "Super",
@@ -134,6 +142,31 @@ export function matchSpec(spec, event) {
   if (!want) return false;
   const got = normalizeSpec(specFromEvent(event));
   return want === got;
+}
+
+/** 阅读快捷键只能是一颗键；`+` 本身不是组合键分隔符。 */
+export function isSingleKeySpec(spec) {
+  const raw = String(spec ?? "").trim();
+  return !!raw && (raw === "+" || !raw.includes("+"));
+}
+
+/** 独立修饰键忽略自身的标志位，其余键沿用完整组合的精确匹配。 */
+export function matchSingleKey(spec, event) {
+  if (!event || !isSingleKeySpec(spec)) return false;
+  const want = normalizeSpec(spec);
+  const key = keyFromEvent(event);
+  if (want !== key) return false;
+  const ownFlag = {
+    Ctrl: "ctrlKey", Alt: "altKey", Shift: "shiftKey", Super: "metaKey",
+  }[key];
+  if (ownFlag || key === "AltGraph") {
+    const flags = ["ctrlKey", "altKey", "shiftKey", "metaKey"];
+    return flags.every((flag) =>
+      !event[flag] || flag === ownFlag ||
+      (key === "AltGraph" && (flag === "ctrlKey" || flag === "altKey")),
+    );
+  }
+  return matchSpec(want, event);
 }
 
 /** 显示名：把配置串写成读者看得懂的样子（`PgDn` 之类由调用方拼） */

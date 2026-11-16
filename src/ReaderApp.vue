@@ -12,7 +12,7 @@ import {
   switchChapter,
   takePending,
 } from "./bridge";
-import { matchSpec } from "./keys";
+import { matchSingleKey } from "./keys";
 import { themePatch } from "./theme";
 import {
   clipHeight,
@@ -755,21 +755,16 @@ watch(
 );
 
 /**
- * 阅读窗口的键盘：只放行配置里的那三个，其余一概吃掉。
+ * 阅读窗口的键盘：只放行配置里的那三个单键，其余一概吃掉。
  *
- * 带修饰键的组合（默认 Alt+PgDn 就是那个呼出 / 收起的全局快捷键）也不在这里动：
- * 它由后端的全局快捷键统一开关接管。这里再处理一次的话，同一次按键会走两条路 ——
- * 一条把窗口收起，另一条看见窗口已经收起又把它呼出来，就成了「关掉又自己打开」。
+ * Ctrl / Alt / Shift / Super 本身能当阅读键，但带修饰键的普通主键仍不在这里动：
+ * 默认 Alt+PgDn 由后端全局快捷键接管，不能同一次按键在这里再翻一页。
  *
  * 其余的键（Home / End / 方向键 / 快捷键 / F1…）连同浏览器默认行为一起
  * `preventDefault` 掉：这是个无边框阅读窗口，不该有别的动作从里面冒出去。
  */
 async function onKeydown(event) {
-  if (event.ctrlKey || event.altKey || event.metaKey) {
-    event.preventDefault();
-    return;
-  }
-  if (matchSpec(keyHide.value, event)) {
+  if (matchSingleKey(keyHide.value, event)) {
     event.preventDefault();
     // 隐藏键走的是「收起」那条路，和全局快捷键一模一样：只把窗口藏起来，
     // 不写进度也不刷书架。书、章、读到第几屏都还在窗口自己这里，
@@ -778,12 +773,12 @@ async function onKeydown(event) {
     await hide();
     return;
   }
-  if (matchSpec(keyNext.value, event)) {
+  if (matchSingleKey(keyNext.value, event)) {
     event.preventDefault();
     await step(1);
     return;
   }
-  if (matchSpec(keyPrev.value, event)) {
+  if (matchSingleKey(keyPrev.value, event)) {
     event.preventDefault();
     await step(-1);
     return;

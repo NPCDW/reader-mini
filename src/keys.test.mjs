@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { displaySpec, hasModifier, matchSpec, normalizeSpec, specFromEvent } from "./keys.js";
+import {
+  displaySpec, hasModifier, isSingleKeySpec, keyFromEvent,
+  matchSingleKey, matchSpec, normalizeSpec, specFromEvent,
+} from "./keys.js";
 
 /** 造一个只带这几个字段的假事件 —— 够 keys.js 用 */
 function ev(key, code, mods = {}) {
@@ -70,6 +73,94 @@ test("多看一个修饰键就不是同一个键", () => {
 test("只按修饰键不算一次录制", () => {
   assert.equal(specFromEvent(ev("Control", "ControlLeft", { ctrl: true })), null);
   assert.equal(specFromEvent(ev("Shift", "ShiftLeft", { shift: true })), null);
+});
+
+test("阅读单键录制支持左右控制键，不等待组合中的主键", () => {
+  const modifiers = [
+    ["Control", "Control", "Ctrl", { ctrl: true }],
+    ["Shift", "Shift", "Shift", { shift: true }],
+    ["Alt", "Alt", "Alt", { alt: true }],
+    ["Meta", "Meta", "Super", { meta: true }],
+    ["OS", "Meta", "Super", { meta: true }],
+    ["AltGraph", "Alt", "AltGraph", { ctrl: true, alt: true }],
+  ];
+  for (const [key, code, expected, mods] of modifiers) {
+    for (const side of ["Left", "Right"]) {
+      const event = ev(key, `${code}${side}`, mods);
+      assert.equal(keyFromEvent(event), expected);
+      assert.equal(isSingleKeySpec(expected), true);
+      assert.equal(matchSingleKey(expected, event), true);
+      // 全局快捷键的录制还是要等真正的主键。
+      assert.equal(specFromEvent(event), null);
+    }
+  }
+});
+
+test("阅读单键录制沿用普通按键名，不拼修饰前缀", () => {
+  const keys = [
+    ["Escape", "Escape", "Esc"],
+    ["Tab", "Tab", "Tab"],
+    ["Enter", "Enter", "Enter"],
+    [" ", "Space", "Space"],
+    ["Backspace", "Backspace", "Backspace"],
+    ["Delete", "Delete", "Delete"],
+    ["PageUp", "PageUp", "PgUp"],
+    ["PageDown", "PageDown", "PgDn"],
+    ["ArrowLeft", "ArrowLeft", "Left"],
+    ["F12", "F12", "F12"],
+    ["CapsLock", "CapsLock", "CapsLock"],
+    ["ContextMenu", "ContextMenu", "ContextMenu"],
+    ["AudioVolumeUp", "AudioVolumeUp", "AudioVolumeUp"],
+    ["p", "KeyP", "P"],
+    ["1", "Digit1", "1"],
+    ["+", "NumpadAdd", "+"],
+    ["-", "Minus", "-"],
+    ["*", "NumpadMultiply", "*"],
+    ["/", "Slash", "/"],
+  ];
+  for (const [key, code, expected] of keys) {
+    assert.equal(keyFromEvent(ev(key, code)), expected);
+    assert.equal(matchSingleKey(expected, ev(key, code)), true);
+    assert.equal(keyFromEvent(ev(key, code, { ctrl: true, shift: true })), expected);
+  }
+  assert.equal(keyFromEvent(ev("+", "Equal", { shift: true })), "+");
+  assert.equal(keyFromEvent(ev("*", "Digit8", { shift: true })), "*");
+  assert.equal(keyFromEvent(null), null);
+  assert.equal(keyFromEvent(ev("", "")), null);
+});
+
+test("单键校验允许控制键和加号，不接受旧组合键", () => {
+  for (const spec of ["Ctrl", "Shift", "Alt", "Super", "AltGraph", "+", "Esc", "a"]) {
+    assert.equal(isSingleKeySpec(spec), true);
+  }
+  for (const spec of ["", " ", null, "Ctrl+P", "Shift+A", "Alt+PgDn", "Ctrl++", "A+", "++"]) {
+    assert.equal(isSingleKeySpec(spec), false);
+  }
+  assert.equal(normalizeSpec("Control"), "Ctrl");
+  assert.equal(normalizeSpec("Meta"), "Super");
+  assert.equal(normalizeSpec("OS"), "Super");
+  assert.equal(normalizeSpec("altgraph"), "AltGraph");
+  assert.equal(matchSingleKey("control", ev("Control", "ControlLeft", { ctrl: true })), true);
+  assert.equal(matchSingleKey("Meta", ev("OS", "MetaLeft", { meta: true })), true);
+});
+
+test("阅读单键匹配不把组合键或后续主键认作控制键", () => {
+  assert.equal(matchSingleKey("Ctrl", ev("p", "KeyP", { ctrl: true })), false);
+  assert.equal(matchSingleKey("Ctrl", ev("+", "NumpadAdd", { ctrl: true })), false);
+  assert.equal(matchSingleKey("Alt", ev("+", "NumpadAdd", { alt: true })), false);
+  assert.equal(matchSingleKey("Super", ev("+", "NumpadAdd", { meta: true })), false);
+  assert.equal(matchSingleKey("Shift", ev("P", "KeyP", { shift: true })), false);
+  assert.equal(matchSingleKey("Ctrl", ev("Control", "ControlLeft", { ctrl: true, shift: true })), false);
+  assert.equal(matchSingleKey("Alt", ev("AltGraph", "AltRight", { ctrl: true, alt: true })), false);
+  assert.equal(matchSingleKey("AltGraph", ev("AltGraph", "AltRight", { ctrl: true, alt: true, shift: true })), false);
+  assert.equal(matchSingleKey("PgDn", ev("PageDown", "PageDown", { alt: true })), false);
+  assert.equal(matchSingleKey("Esc", ev("Escape", "Escape", { shift: true })), false);
+  assert.equal(matchSingleKey("Ctrl+P", ev("p", "KeyP", { ctrl: true })), false);
+  assert.equal(matchSingleKey("Shift+A", ev("A", "KeyA", { shift: true })), false);
+  assert.equal(matchSingleKey("+", ev("+", "Equal", { shift: true })), true);
+  assert.equal(matchSingleKey("*", ev("*", "Digit8", { shift: true })), true);
+  assert.equal(matchSingleKey("+", ev("+", "NumpadAdd", { ctrl: true })), false);
+  assert.equal(matchSingleKey("Ctrl", null), false);
 });
 
 test("displaySpec：写成人看得懂的样子", () => {
